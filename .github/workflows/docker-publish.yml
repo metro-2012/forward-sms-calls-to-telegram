@@ -11,7 +11,7 @@ name: Publish Docker image
 
 on:
   push:
-    branches: ['master']
+    branches: ['main']
 
 jobs:
   push_to_registry:
@@ -36,7 +36,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
-          images: metro2012/avc
+          images: metro2012/forward-sms-calls-to-telegram
 
       - name: Build and push Docker image
         id: push
