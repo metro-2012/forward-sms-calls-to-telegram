@@ -4,7 +4,7 @@ FROM python:3.13
 WORKDIR /app
 
 # Копируем файлы приложения в контейнер
-COPY . /app
+COPY main.py requirements.txt /app/
 
 # Устанавливаем зависимости из файла requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
