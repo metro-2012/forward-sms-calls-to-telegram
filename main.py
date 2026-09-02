@@ -6,12 +6,10 @@ import logging
 import signal
 from collections import defaultdict
 from typing import Optional, Dict, Any, List, Tuple
-
 import serial
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,13 +46,26 @@ CLIP_DEBOUNCE_TIME = float(os.getenv("CLIP_DEBOUNCE_TIME", "10.0"))
 # ==========================================================
 
 # Настройка логирования
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL
+}
+
+log_level = LOG_LEVELS.get(log_level_str, logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("ModemBot")
 
+if log_level_str not in LOG_LEVELS:
+    logger.warning(f"Неверный LOG_LEVEL '{log_level_str}', установлен INFO")
 
 class TelegramNotifier:
     """Управление отправкой уведомлений в Telegram с повторными попытками."""
