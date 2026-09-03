@@ -394,14 +394,28 @@ class ModemController:
             ussd_code = parts[1]
             self.notifier.send_message(f"⏳ Отправка USSD запроса `{ussd_code}`...")
 
-            # 1. Принудительно устанавливаем алфавит GSM
-            self._send_at_command(b'AT+CSCS="GSM"\r\n', timeout=0.5)
+            # ПОПЫТКА 1: Используем алфавит IRA (чистый ASCII).
+            # Это самый надежный вариант для передачи простых команд вроде *100# в текстовом виде.
+            self._send_at_command(b'AT+CSCS="IRA"\r\n', timeout=0.5)
 
-            # 2. Отправляем запрос прямым текстом (оператор это любит больше)
-            self._send_at_command(f'AT+CUSD=1,"{ussd_code}",15\r\n'.encode(), timeout=2.0)
+            # Отправляем без принудительного указания кодировки (модем/сеть выберут сами)
+            resp = self._send_at_command(f'AT+CUSD=1,"{ussd_code}"\r\n'.encode(), timeout=2.0)
+
             if resp and "ERROR" in resp:
-                logger.warning("Первая попытка не удалась, отправляем с параметром ,15")
-                self._send_at_command(f'AT+CUSD=1,"{ucs2_ussd}",15\r\n'.encode(), timeout=2.0)
+                logger.warning("Первая попытка USSD не удалась. Пробуем формат UCS2 (HEX)...")
+
+                # ПОПЫТКА 2: Конвертируем код в UCS2 (например, *100# превращается в 002A0031003000300023)
+                ucs2_ussd = "".join([f"{ord(c):04X}" for c in ussd_code])
+
+                # Переводим модем в режим UCS2
+                self._send_at_command(b'AT+CSCS="UCS2"\r\n', timeout=0.5)
+
+                # Отправляем HEX-строку с указанием DCS=15 (требование многих сетей для понимания запроса)
+                resp = self._send_at_command(f'AT+CUSD=1,"{ucs2_ussd}",15\r\n'.encode(), timeout=2.0)
+
+                if resp and "ERROR" in resp:
+                    self.notifier.send_message(
+                        "❌ Ошибка USSD: Модем отверг запрос. Убедитесь, что сим-карта зарегистрирована в сети.")
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
