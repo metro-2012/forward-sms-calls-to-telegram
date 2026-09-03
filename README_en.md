@@ -2,7 +2,7 @@
 
 # Forward SMS & Calls to Telegram
 
-A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS and make ring-and-drop calls** (pinging) directly via Telegram commands.
+A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS, make ring-and-drop calls** (pinging), and **send USSD requests** (check balance, etc.) directly via Telegram commands.
 
 The application communicates via a serial port (using AT commands), which makes it compatible with most popular USB modems (Huawei, ZTE, Quectel, etc.) for building notification systems, SMS gateways, or smart home integrations.
 
@@ -12,6 +12,7 @@ The application communicates via a serial port (using AT commands), which makes 
 * 📞 **Incoming calls:** Notifications for incoming calls (sends the caller's phone number) and automatically drops the call after a specified delay.
 * ✉️ **Sending SMS:** Send messages to any number directly from the chat with the bot.
 * ☎️ **Outgoing calls:** Command to make a ring-and-drop call (the bot dials the specified number and hangs up after a set time).
+* 💰 **USSD requests:** Execute USSD commands directly from chat (e.g., checking balance).
 * 🐳 Ready to run in Docker with flexible configuration via environment variables.
 
 ---
@@ -23,6 +24,7 @@ Send the following commands to your Telegram bot:
 * `/help` or `/start` — Show help for available commands.
 * `/call <number>` — Make an outgoing ring-and-drop call. (Example: `/call +79991234567`)
 * `/sms <number> <text>` — Send an SMS. (Example: `/sms +79991234567 Hello, this is a test!`)
+* `/ussd <code>` — Send a USSD request. (Example: `/ussd *100#` or `/ussd *102#`)
 
 ---
 
@@ -62,4 +64,5 @@ services:
       - LOG_LEVEL=INFO
       - OUTGOING_CALL_DURATION=5.0
       - INCOMING_CALL_DURATION=2.0
+      - CLIP_DEBOUNCE_TIME=10.0
 ```

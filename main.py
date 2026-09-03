@@ -416,14 +416,8 @@ class ModemController:
         elif action == "/ussd" and len(parts) >= 2:
             ussd_code = parts[1]
             self.notifier.send_message(f"⏳ Отправка USSD запроса `{ussd_code}`...")
-
-            # Кодируем команду (например, *102# превратится в AA184C3602)
             packed_ussd = encode_ussd_7bit(ussd_code)
-
-            # Устанавливаем GSM алфавит
             self._send_at_command(b'AT+CSCS="GSM"\r\n', timeout=0.5)
-
-            # Отправляем запакованный HEX с параметром DCS=15
             resp = self._send_at_command(f'AT+CUSD=1,"{packed_ussd}",15\r\n'.encode(), timeout=2.0)
 
             if resp and "ERROR" in resp:
