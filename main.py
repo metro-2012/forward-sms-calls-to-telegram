@@ -349,13 +349,66 @@ class ModemController:
                 return False
 
     def perform_call(self, number: str, duration: float = OUTGOING_CALL_DURATION) -> None:
-        self.notifier.send_message(f"⏳ Начинаю звонок на `{number}`...")
+        self.notifier.send_message(f"⏳ Начинаю набор номера `{number}`...")
         logger.info(f"Исходящий звонок на {number}...")
-        self._send_at_command(f"ATD{number};\r\n".encode())
-        time.sleep(duration)
-        self._send_at_command(b"AT+CHUP\r\n")
-        logger.info(f"Звонок на {number} завершен.")
-        self.notifier.send_message(f"✅ Звонок-сброс на `{number}` завершен.")
+
+        if not self.ser or not self.ser.is_open:
+            logger.error("Порт закрыт, звонок невозможен.")
+            return
+
+        self.ser.reset_input_buffer()
+        self.ser.timeout = 1.0  # Устанавливаем таймаут для неблокирующего чтения
+
+        # Отправляем команду звонка напрямую
+        cmd = f"ATD{number};\r\n".encode()
+        logger.debug(f">>> TX: {cmd}")
+        self.ser.write(cmd)
+
+        call_initiated = False
+        start_dial_time = time.time()
+        dial_timeout = 15.0  # Максимальное время ожидания ответа сети на начало набора
+
+        # 1. Ждем, когда модем ответит OK (начало дозвона) или выдаст ошибку
+        while time.time() - start_dial_time < dial_timeout:
+            line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            logger.debug(f"<<< RX (Dialing): {line}")
+
+            if "OK" in line:
+                call_initiated = True
+                break
+            elif any(err in line for err in ["ERROR", "NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE"]):
+                logger.warning(f"Сбой при попытке позвонить: {line}")
+                self.notifier.send_message(f"❌ Не удалось позвонить на `{number}`. Ответ сети: `{line}`")
+                return
+
+        # 2. Если набор успешно начался, отсчитываем нужное время (duration)
+        if call_initiated:
+            logger.info(f"Дозвон пошел, ждем {duration} сек...")
+            wait_start = time.time()
+
+            # Вместо time.sleep() слушаем порт, чтобы отловить ранний сброс
+            while time.time() - wait_start < duration:
+                line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                if line:
+                    logger.debug(f"<<< RX (Call in progress): {line}")
+                    if any(err in line for err in ["NO CARRIER", "BUSY"]):
+                        logger.info(f"Вызов завершен со стороны сети/абонента: {line}")
+                        self.notifier.send_message(f"ℹ️ Абонент `{number}` отклонил или сбросил вызов ({line}).")
+                        return  # Модем уже положил трубку, AT+CHUP не нужен
+
+            # 3. Время вышло, кладем трубку сами
+            logger.info(f"Время вышло. Завершаем звонок на {number}...")
+            self._send_at_command(b"AT+CHUP\r\n")
+            self.notifier.send_message(f"✅ Звонок-сброс на `{number}` успешно выполнен.")
+
+        else:
+            # Если за dial_timeout мы не получили ни OK, ни ошибки
+            logger.error("Таймаут ожидания инициализации вызова модемом.")
+            self._send_at_command(b"AT+CHUP\r\n")
+            self.notifier.send_message(f"❌ Модем не ответил на команду вызова `{number}` (таймаут).")
 
     def send_sms(self, number: str, text: str) -> None:
         self.notifier.send_message(f"⏳ Формирование PDU и отправка на `{number}`...")
