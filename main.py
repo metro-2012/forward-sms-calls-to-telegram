@@ -365,11 +365,29 @@ class ModemController:
 
             for i, pdu_obj in enumerate(pdus, 1):
                 logger.info(f"Отправка части SMS {i}/{total} на номер {number}...")
-                logger.info(f"Длина PDU: {pdu_obj.length}, PDU: {pdu_obj.pdu}")
 
-                # В библиотеке pdu_obj.length — это правильная длина (без учета байта SMSC),
-                # а pdu_obj.pdu — это готовая HEX-строка
-                success = self._send_pdu_to_modem(pdu_obj.length, pdu_obj.pdu)
+                pdu_hex = pdu_obj.pdu.upper()
+
+                # Если библиотека не добавила SMS-центр (SMSC), добавляем "00"
+                # "00" означает, что модем должен взять SMSC по умолчанию из настроек SIM-карты
+                if not pdu_hex.startswith("00") and not pdu_hex.startswith("0791"):
+                    pdu_hex = "00" + pdu_hex
+
+                # === Точный ручной подсчет длины для AT+CMGS ===
+                # 1. Получаем длину SMSC в байтах (это первые 2 символа HEX-строки)
+                smsc_len_bytes = int(pdu_hex[:2], 16)
+
+                # 2. Считаем общую длину всей PDU-строки в байтах (2 hex символа = 1 байт)
+                total_pdu_bytes = len(pdu_hex) // 2
+
+                # 3. Длина для модема = Общая длина минус (байт длины SMSC + сами данные SMSC)
+                actual_length = total_pdu_bytes - (1 + smsc_len_bytes)
+
+                logger.info(f"PDU ({len(pdu_hex)} chars): {pdu_hex}")
+                logger.info(f"Вычисленная длина для AT+CMGS: {actual_length} (Библиотечная была: {pdu_obj.length})")
+
+                # Отправляем с нашей вычисленной длиной и строкой
+                success = self._send_pdu_to_modem(actual_length, pdu_hex)
 
                 if not success:
                     raise Exception(f"Ошибка при отправке части {i} из {total}")
