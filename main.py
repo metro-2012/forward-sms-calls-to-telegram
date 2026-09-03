@@ -392,7 +392,8 @@ class ModemController:
             self.send_sms(parts[1], parts[2])
         elif action == "/ussd" and len(parts) >= 2:
             self.notifier.send_message(f"⏳ Отправка USSD запроса `{parts[1]}`...")
-            self._send_at_command(f'AT+CUSD=1,"{parts[1]}",15\r\n'.encode())
+            self._send_at_command(b'AT+CSCS="GSM"\r\n', timeout=0.5)
+            self._send_at_command(f'AT+CUSD=1,"{parts[1]}"\r\n'.encode())
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
