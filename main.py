@@ -162,6 +162,7 @@ class ModemController:
         self.notifier = notifier
         self.ser: Optional[serial.Serial] = None
         self.last_call_info: Dict[str, Any] = {"number": None, "timestamp": 0.0}
+        self.is_running = False  # Флаг для контроля работы главного цикла
 
     def connect(self) -> None:
         logger.info(f"Открытие порта {self.port}...")
@@ -170,7 +171,6 @@ class ModemController:
         self._init_modem()
         logger.info("Модем инициализирован и готов к работе.")
 
-        # Проверка непрочитанных СМС при старте
         try:
             logger.info("Проверка пропущенных СМС в памяти...")
             self.process_all_unread_sms()
@@ -185,6 +185,10 @@ class ModemController:
             except Exception as e:
                 logger.warning(f"Ошибка при закрытии порта: {e}")
         self.ser = None
+
+    def stop(self) -> None:
+        """Сигнал к мягкой остановке рабочего цикла."""
+        self.is_running = False
 
     def _send_at_command(self, command: bytes, timeout: float = 1.0) -> Optional[str]:
         if not self.ser or not self.ser.is_open:
@@ -217,10 +221,17 @@ class ModemController:
             b"AT+CLIP=1\r\n",
             b"AT+CNMI=2,1,0,0,0\r\n"
         ]
+
+        # Если уровень логов не DEBUG, отключаем спам URC (RSSi, BOOT и т.д.)
+        if log_level != logging.DEBUG:
+            logger.info("LOG_LEVEL не DEBUG. Отключаем периодические URC (AT^CURC=0)...")
+            commands.append(b"AT^CURC=0\r\n")
+
         for cmd in commands:
             resp = self._send_at_command(cmd)
             if resp is None:
-                raise serial.SerialException("Модем не отвечает при инициализации")
+                raise serial.SerialException(f"Модем не отвечает при отправке {cmd}")
+
         if self.ser:
             self.ser.reset_input_buffer()
 
@@ -349,6 +360,7 @@ class ModemController:
                 return False
 
     def perform_call(self, number: str, duration: float = OUTGOING_CALL_DURATION) -> None:
+        """Интеллектуальный исходящий звонок с отслеживанием статуса (занято, ответ сети, сброс)"""
         self.notifier.send_message(f"⏳ Начинаю набор номера `{number}`...")
         logger.info(f"Исходящий звонок на {number}...")
 
@@ -366,9 +378,9 @@ class ModemController:
 
         call_initiated = False
         start_dial_time = time.time()
-        dial_timeout = 15.0  # Максимальное время ожидания ответа сети на начало набора
+        dial_timeout = 15.0  # Макс. время ожидания ответа сети на начало набора
 
-        # 1. Ждем, когда модем ответит OK (начало дозвона) или выдаст ошибку
+        # 1. Ждем подтверждения набора от модема (OK) или ошибку сети
         while time.time() - start_dial_time < dial_timeout:
             line = self.ser.readline().decode("utf-8", errors="ignore").strip()
             if not line:
@@ -384,12 +396,11 @@ class ModemController:
                 self.notifier.send_message(f"❌ Не удалось позвонить на `{number}`. Ответ сети: `{line}`")
                 return
 
-        # 2. Если набор успешно начался, отсчитываем нужное время (duration)
+        # 2. Если набор начался, ждем заданное время, слушая порт
         if call_initiated:
             logger.info(f"Дозвон пошел, ждем {duration} сек...")
             wait_start = time.time()
 
-            # Вместо time.sleep() слушаем порт, чтобы отловить ранний сброс
             while time.time() - wait_start < duration:
                 line = self.ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -397,15 +408,15 @@ class ModemController:
                     if any(err in line for err in ["NO CARRIER", "BUSY"]):
                         logger.info(f"Вызов завершен со стороны сети/абонента: {line}")
                         self.notifier.send_message(f"ℹ️ Абонент `{number}` отклонил или сбросил вызов ({line}).")
-                        return  # Модем уже положил трубку, AT+CHUP не нужен
+                        return  # Трубка уже положена, AT+CHUP не нужен
 
-            # 3. Время вышло, кладем трубку сами
+            # 3. Время вышло, мы сами кладем трубку
             logger.info(f"Время вышло. Завершаем звонок на {number}...")
             self._send_at_command(b"AT+CHUP\r\n")
             self.notifier.send_message(f"✅ Звонок-сброс на `{number}` успешно выполнен.")
 
         else:
-            # Если за dial_timeout мы не получили ни OK, ни ошибки
+            # Таймаут на этапе инициализации
             logger.error("Таймаут ожидания инициализации вызова модемом.")
             self._send_at_command(b"AT+CHUP\r\n")
             self.notifier.send_message(f"❌ Модем не ответил на команду вызова `{number}` (таймаут).")
@@ -475,8 +486,10 @@ class ModemController:
         self.connect()
         logger.info("Ожидание событий...")
 
+        self.is_running = True
+
         try:
-            while self.ser and self.ser.is_open:
+            while self.is_running and self.ser and self.ser.is_open:
                 try:
                     while not cmd_queue.empty():
                         cmd = cmd_queue.get_nowait()
@@ -495,7 +508,6 @@ class ModemController:
                 if not line:
                     continue
 
-                # Логируем все непустые строки, поступающие от модема вне опросов (URC)
                 logger.debug(f"<<< URC: {line}")
 
                 if line.startswith("+CMT:"):
@@ -539,6 +551,7 @@ def main() -> None:
         logger.info(f"\nПолучен сигнал {sig}, завершение работы...")
         running = False
         notifier.stop_polling()
+        modem.stop()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
