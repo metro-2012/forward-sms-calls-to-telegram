@@ -101,6 +101,10 @@ class TelegramNotifier:
         self.session.mount("https://", adapter)
 
     def send_message(self, message: str) -> bool:
+        # Логируем отправляемое сообщение до попытки сетевого запроса.
+        # Используем repr() для того, чтобы многострочные СМС не ломали структуру логов
+        logger.info(f"Отправка в Telegram: {repr(message)}")
+
         try:
             url = f"{self.base_url}/sendMessage"
             payload = {
@@ -222,7 +226,7 @@ class ModemController:
             b"AT+CNMI=2,1,0,0,0\r\n"
         ]
 
-        # Если уровень логов не DEBUG, отключаем спам URC (RSSi, BOOT и т.д.)
+        # Если уровень логов не DEBUG, отключаем спам URC (RSSI, BOOT и т.д.)
         if log_level != logging.DEBUG:
             logger.info("LOG_LEVEL не DEBUG. Отключаем периодические URC (AT^CURC=0)...")
             commands.append(b"AT^CURC=0\r\n")
@@ -489,6 +493,7 @@ class ModemController:
         self.is_running = True
 
         try:
+            # Обновленное условие цикла, реагирующее на сигнал остановки
             while self.is_running and self.ser and self.ser.is_open:
                 try:
                     while not cmd_queue.empty():
@@ -551,7 +556,7 @@ def main() -> None:
         logger.info(f"\nПолучен сигнал {sig}, завершение работы...")
         running = False
         notifier.stop_polling()
-        modem.stop()
+        modem.stop()  # Сигнал классу ModemController остановить свой цикл
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
