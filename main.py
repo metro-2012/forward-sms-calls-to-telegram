@@ -391,9 +391,27 @@ class ModemController:
         elif action == "/sms" and len(parts) >= 3:
             self.send_sms(parts[1], parts[2])
         elif action == "/ussd" and len(parts) >= 2:
-            self.notifier.send_message(f"⏳ Отправка USSD запроса `{parts[1]}`...")
-            self._send_at_command(b'AT+CSCS="GSM"\r\n', timeout=0.5)
-            self._send_at_command(f'AT+CUSD=1,"{parts[1]}"\r\n'.encode())
+            ussd_code = parts[1]
+            self.notifier.send_message(f"⏳ Отправка USSD запроса `{ussd_code}`...")
+
+            # 1. Включаем текстовую расшифровку ошибок вместо просто "ERROR"
+            self._send_at_command(b'AT+CMEE=2\r\n', timeout=0.5)
+
+            # 2. Переводим модем в режим кодировки UCS2
+            self._send_at_command(b'AT+CSCS="UCS2"\r\n', timeout=0.5)
+
+            # 3. Кодируем сам USSD запрос в UCS2 HEX (например: *100# -> 002A0031003000300023)
+            ucs2_ussd = "".join([f"{ord(c):04X}" for c in ussd_code])
+
+            logger.info(f"Сформирован UCS2 USSD запрос: {ucs2_ussd}")
+
+            # 4. Пробуем отправить (сначала без параметра кодировки сети)
+            resp = self._send_at_command(f'AT+CUSD=1,"{ucs2_ussd}"\r\n'.encode(), timeout=2.0)
+
+            # 5. Если модем всё равно выдал ERROR, пробуем принудительно указать DCS=15 (GSM-7)
+            if resp and "ERROR" in resp:
+                logger.warning("Первая попытка не удалась, отправляем с параметром ,15")
+                self._send_at_command(f'AT+CUSD=1,"{ucs2_ussd}",15\r\n'.encode(), timeout=2.0)
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
