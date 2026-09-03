@@ -184,8 +184,19 @@ class ModemController:
             return None
         try:
             self.ser.write(command)
-            time.sleep(0.5)
-            return self.ser.read_all().decode("utf-8", errors="ignore")
+            self.ser.timeout = timeout
+
+            # Читаем все подряд, пока не встретим OK или ERROR
+            # Это мгновенно вернет ответ, как только модем его отдаст (обычно 10-50 мс)
+            response = b""
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                line = self.ser.readline()
+                response += line
+                if b"OK\r\n" in response or b"ERROR\r\n" in response:
+                    break
+
+            return response.decode("utf-8", errors="ignore")
         except (serial.SerialException, OSError, BrokenPipeError) as e:
             logger.warning(f"Ошибка при отправке команды {command}: {e}")
             return None
@@ -302,46 +313,30 @@ class ModemController:
     # ================= ЛОГИКА ОТПРАВКИ PDU =================
 
     def _send_pdu_to_modem(self, pdu_len: int, pdu_data: str) -> bool:
-        """Отправляет сырой PDU-блок на модем с контролем приглашения '>'"""
         self.ser.reset_input_buffer()
         self.ser.write(f"AT+CMGS={pdu_len}\r\n".encode())
 
-        expected = b">"
-        t_end = time.time() + 3.0
-        buffer = b""
-        prompt_ok = False
-        while time.time() < t_end:
-            if self.ser.in_waiting:
-                buffer += self.ser.read(self.ser.in_waiting)
-                if expected in buffer:
-                    prompt_ok = True
-                    break
-            time.sleep(0.1)
-
-        if not prompt_ok:
-            # Декодируем буфер, чтобы увидеть реальную ошибку (например, ERROR или +CMS ERROR)
-            modem_reply = buffer.decode(errors='ignore').strip()
-            logger.error(f"Нет символа '>' от модема. Ответ модема: '{modem_reply}'")
-            self.ser.write(b"\x1B")  # ESC для отмены
+        self.ser.timeout = 3.0
+        # Ждем символ приглашения
+        prompt = self.ser.read_until(b"> ")
+        if b">" not in prompt:
+            logger.error(f"Нет символа '>' от модема. Ответ: {prompt.decode(errors='ignore')}")
+            self.ser.write(b"\x1B")  # ESC
             return False
 
-        # Отправляем PDU и символ CTRL+Z (0x1A)
         self.ser.write((pdu_data + "\x1A").encode())
 
-        t_end = time.time() + 15.0
-        buffer = b""
-        while time.time() < t_end:
-            if self.ser.in_waiting:
-                buffer += self.ser.read(self.ser.in_waiting)
-                if b"OK\r\n" in buffer:
-                    return True
-                if b"ERROR\r\n" in buffer:
-                    logger.error(f"Ошибка от модема: {buffer.decode(errors='ignore')}")
-                    return False
-            time.sleep(0.2)
-
-        logger.error("Таймаут при ожидании OK после отправки PDU.")
-        return False
+        self.ser.timeout = 15.0
+        # Ждем ответа OK или ERROR
+        response = b""
+        while True:
+            line = self.ser.readline()
+            response += line
+            if b"OK\r\n" in response:
+                return True
+            if b"ERROR\r\n" in response or line == b"":  # пустая строка = таймаут
+                logger.error(f"Ошибка/таймаут от модема: {response.decode(errors='ignore')}")
+                return False
 
     def perform_call(self, number: str, duration: float = OUTGOING_CALL_DURATION) -> None:
         self.notifier.send_message(f"⏳ Начинаю звонок на `{number}`...")
