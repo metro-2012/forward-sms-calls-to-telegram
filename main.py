@@ -63,6 +63,32 @@ logging.basicConfig(
 logger = logging.getLogger("ModemBot")
 
 
+def encode_ussd_7bit(text: str) -> str:
+    """Упаковывает ASCII строку (например '*102#') в GSM 7-bit PDU HEX-строку."""
+    septets = [ord(c) & 0x7F for c in text]
+    octets = []
+    carry = 0
+    carry_bits = 0
+
+    for septet in septets:
+        take_bits = 8 - carry_bits
+
+        if take_bits == 8:
+            carry = septet
+            carry_bits = 7
+        else:
+            octet = carry | ((septet << carry_bits) & 0xFF)
+            octets.append(octet)
+
+            carry = septet >> take_bits
+            carry_bits = 7 - take_bits
+
+    if carry_bits > 0:
+        octets.append(carry)
+
+    return "".join([f"{b:02X}" for b in octets])
+
+
 class TelegramNotifier:
     """Управление отправкой уведомлений и получением команд из Telegram."""
 
@@ -73,7 +99,6 @@ class TelegramNotifier:
         self.running = False
         self.poll_thread = None
 
-        # Раздельные сессии для потокобезопасности
         self.poll_session = requests.Session()
         self.send_session = requests.Session()
 
@@ -129,10 +154,10 @@ class TelegramNotifier:
                 else:
                     time.sleep(2)
             except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as e:
-                logger.debug(f"Сетевая ошибка поллинга (это нормально при перебоях): {e}")
+                logger.debug(f"Сетевая ошибка поллинга: {e}")
                 time.sleep(5)
             except Exception as e:
-                logger.error(f"Непредвиденная ошибка при поллинге Telegram: {e}")
+                logger.error(f"Непредвиденная ошибка при поллинге: {e}")
                 time.sleep(5)
 
 
@@ -200,7 +225,7 @@ class ModemController:
         commands = [
             b"AT\r\n",
             b"ATE0\r\n",
-            b"AT+CMGF=0\r\n",  # Только PDU режим
+            b"AT+CMGF=0\r\n",
             b"AT+CLIP=1\r\n",
             b"AT+CNMI=2,1,0,0,0\r\n"
         ]
@@ -249,7 +274,6 @@ class ModemController:
             except Exception as e:
                 logger.error(f"Ошибка декодирования PDU (индекс {idx}): {e}")
 
-        # Безопасное удаление: удаляем только если сообщение ушло в ТГ
         for sender, items in grouped_sms.items():
             full_text = "".join([item[1] for item in items])
             indices_to_delete = [item[0] for item in items]
@@ -291,7 +315,6 @@ class ModemController:
         msg = f"📞 *Входящий звонок*\n👤 От: `{final_sender}`"
         self.notifier.send_message(msg)
 
-        # Не блокируем основной поток, закидываем команду на сброс в очередь через таймер
         threading.Timer(
             INCOMING_CALL_DURATION,
             lambda: self.cmd_queue.put("/internal_hangup")
@@ -308,7 +331,7 @@ class ModemController:
             self.ser.write(b"\x1B")
             return False
 
-        time.sleep(0.1)  # Микро-пауза для стабилизации буфера модема
+        time.sleep(0.1)
         self.ser.write((pdu_data + "\x1A").encode())
         self.ser.timeout = 15.0
 
@@ -324,7 +347,6 @@ class ModemController:
 
     def perform_call(self, number: str, duration: float = OUTGOING_CALL_DURATION) -> None:
         self.notifier.send_message(f"⏳ Начинаю набор номера `{number}`...")
-
         self.ser.reset_input_buffer()
         self.ser.timeout = 1.0
         self.ser.write(f"ATD{number};\r\n".encode())
@@ -332,7 +354,6 @@ class ModemController:
         call_initiated = False
         start_dial_time = time.time()
 
-        # Ждем 2 секунды быстрых ошибок (занято, нет сети)
         while time.time() - start_dial_time < 2.0:
             line = self.ser.readline().decode("utf-8", errors="ignore").strip()
             if line and any(err in line for err in ["ERROR", "NO CARRIER", "BUSY", "NO DIALTONE"]):
@@ -383,39 +404,31 @@ class ModemController:
         action = parts[0].lower()
 
         if action == "/internal_hangup":
-            # Вызывается внутренним таймером асинхронно
             self._send_at_command(b"AT+CHUP\r\n")
             if self.ser: self.ser.reset_input_buffer()
+
         elif action == "/call" and len(parts) >= 2:
             self.perform_call(parts[1])
+
         elif action == "/sms" and len(parts) >= 3:
             self.send_sms(parts[1], parts[2])
+
         elif action == "/ussd" and len(parts) >= 2:
             ussd_code = parts[1]
             self.notifier.send_message(f"⏳ Отправка USSD запроса `{ussd_code}`...")
 
-            # ПОПЫТКА 1: Используем алфавит IRA (чистый ASCII).
-            # Это самый надежный вариант для передачи простых команд вроде *100# в текстовом виде.
-            self._send_at_command(b'AT+CSCS="IRA"\r\n', timeout=0.5)
+            # Кодируем команду (например, *102# превратится в AA184C3602)
+            packed_ussd = encode_ussd_7bit(ussd_code)
 
-            # Отправляем без принудительного указания кодировки (модем/сеть выберут сами)
-            resp = self._send_at_command(f'AT+CUSD=1,"{ussd_code}"\r\n'.encode(), timeout=2.0)
+            # Устанавливаем GSM алфавит
+            self._send_at_command(b'AT+CSCS="GSM"\r\n', timeout=0.5)
+
+            # Отправляем запакованный HEX с параметром DCS=15
+            resp = self._send_at_command(f'AT+CUSD=1,"{packed_ussd}",15\r\n'.encode(), timeout=2.0)
 
             if resp and "ERROR" in resp:
-                logger.warning("Первая попытка USSD не удалась. Пробуем формат UCS2 (HEX)...")
+                self.notifier.send_message("❌ Ошибка USSD: Модем отверг запрос (ERROR).")
 
-                # ПОПЫТКА 2: Конвертируем код в UCS2 (например, *100# превращается в 002A0031003000300023)
-                ucs2_ussd = "".join([f"{ord(c):04X}" for c in ussd_code])
-
-                # Переводим модем в режим UCS2
-                self._send_at_command(b'AT+CSCS="UCS2"\r\n', timeout=0.5)
-
-                # Отправляем HEX-строку с указанием DCS=15 (требование многих сетей для понимания запроса)
-                resp = self._send_at_command(f'AT+CUSD=1,"{ucs2_ussd}",15\r\n'.encode(), timeout=2.0)
-
-                if resp and "ERROR" in resp:
-                    self.notifier.send_message(
-                        "❌ Ошибка USSD: Модем отверг запрос. Убедитесь, что сим-карта зарегистрирована в сети.")
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
@@ -468,7 +481,17 @@ class ModemController:
 
             # Обработка асинхронного ответа на USSD запрос
             elif line.startswith("+CUSD:"):
-                # Пример формата: +CUSD: 0,"D9775D0E0A97E965",15 или +CUSD: 0,"04120430...",72
+                # Проверка на отбой со стороны сети
+                if line.strip() == "+CUSD: 2":
+                    self.notifier.send_message(
+                        "❌ *Сеть отклонила USSD запрос (+CUSD: 2)*\n"
+                        "Возможные причины:\n"
+                        "1. Модем работает в режиме 'Только 4G' (USSD требует 3G/2G).\n"
+                        "2. Оператор временно недоступен или запрос не поддерживается."
+                    )
+                    continue
+
+                # Парсинг ответа: +CUSD: 0,"HEX_DATA",72 (или 15)
                 match = re.search(r'\+CUSD:\s*\d,\s*"([^"]+)"(?:,\s*(\d+))?', line)
                 if match:
                     hex_text = match.group(1)
@@ -480,9 +503,13 @@ class ModemController:
                         if all(c in "0123456789ABCDEFabcdef" for c in hex_text) and len(hex_text) % 2 == 0:
                             raw_bytes = bytes.fromhex(hex_text)
                             if dcs == 72:  # UCS2 кодировка (обычно кириллица)
-                                decoded = raw_bytes.decode('utf-16-be')
+                                decoded = raw_bytes.decode('utf-16-be', errors='ignore')
                             else:  # GSM-7 (обычно латиница)
-                                decoded = raw_bytes.decode('gsm0338')
+                                try:
+                                    decoded = raw_bytes.decode('gsm0338')
+                                except Exception:
+                                    # Fallback если не сработала библиотека
+                                    decoded = raw_bytes.decode('ascii', errors='ignore')
                     except Exception as e:
                         logger.error(f"Не удалось декодировать USSD: {e}")
 
