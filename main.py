@@ -170,6 +170,13 @@ class ModemController:
         self._init_modem()
         logger.info("Модем инициализирован и готов к работе.")
 
+        # Проверка непрочитанных СМС при старте (они же будут удалены при прочтении)
+        try:
+            logger.info("Проверка пропущенных СМС в памяти...")
+            self.process_all_unread_sms()
+        except Exception as e:
+            logger.error(f"Ошибка при стартовой проверке СМС: {e}")
+
     def disconnect(self) -> None:
         if self.ser and self.ser.is_open:
             logger.info("Закрытие порта...")
@@ -186,8 +193,6 @@ class ModemController:
             self.ser.write(command)
             self.ser.timeout = timeout
 
-            # Читаем все подряд, пока не встретим OK или ERROR
-            # Это мгновенно вернет ответ, как только модем его отдаст (обычно 10-50 мс)
             response = b""
             start_time = time.time()
             while time.time() - start_time < timeout:
@@ -219,18 +224,16 @@ class ModemController:
     def process_all_unread_sms(self) -> None:
         if not self.ser: return
         self.ser.reset_input_buffer()
-        self.ser.write(b"AT+CMGL=0\r\n")
+
+        # Всегда запрашиваем ВСЕ сообщения (AT+CMGL=4).
+        # Это гарантирует, что мы найдем даже те СМС, которые были прочитаны, но не удалились из-за сбоя.
+        self.ser.write(b"AT+CMGL=4\r\n")
         time.sleep(1.5)
         response = self.ser.read_until(b"OK\r\n").decode("utf-8", errors="ignore")
 
-        if "ERROR" in response:
-            self.ser.reset_input_buffer()
-            self.ser.write(b"AT+CMGL=4\r\n")
-            time.sleep(1.5)
-            response = self.ser.read_until(b"OK\r\n").decode("utf-8", errors="ignore")
-
         lines = response.split("\r\n")
         messages_to_process: List[Tuple[str, str]] = []
+        indices_to_delete = set()  # Используем set, чтобы избежать дубликатов индексов
 
         i = 0
         while i < len(lines):
@@ -238,13 +241,17 @@ class ModemController:
             if line.startswith("+CMGL:"):
                 match = re.search(r"\+CMGL:\s*(\d+)\s*,\s*(\d+)", line)
                 if match:
-                    idx, stat = match.group(1), match.group(2)
-                    if stat == "0":
-                        if i + 1 < len(lines):
-                            pdu_hex = lines[i + 1].strip()
-                            if pdu_hex and all(c in "0123456789ABCDEFabcdef" for c in pdu_hex):
-                                messages_to_process.append((idx, pdu_hex))
-                                i += 1
+                    idx = match.group(1)
+
+                    # ГАРАНТИЯ УДАЛЕНИЯ: Добавляем индекс в список на удаление СРАЗУ,
+                    # независимо от того, сможем ли мы потом его расшифровать или нет.
+                    indices_to_delete.add(idx)
+
+                    if i + 1 < len(lines):
+                        pdu_hex = lines[i + 1].strip()
+                        if pdu_hex and all(c in "0123456789ABCDEFabcdef" for c in pdu_hex):
+                            messages_to_process.append((idx, pdu_hex))
+                            i += 1  # Пропускаем строку с PDU
             i += 1
 
         decoded_messages = []
@@ -254,18 +261,17 @@ class ModemController:
                 sms["index"] = idx
                 decoded_messages.append(sms)
             except Exception as e:
-                logger.error(f"Ошибка декодирования: {e}")
+                logger.error(f"Ошибка декодирования PDU (индекс {idx}): {e}. Сообщение будет удалено.")
 
         grouped_sms = defaultdict(list)
-        indices_to_delete = []
 
         for sms in decoded_messages:
             sender = sms.get("sender", "Неизвестный")
             text = sms.get("content", "").strip()
             if text:
                 grouped_sms[sender].append(text)
-            indices_to_delete.append(sms.get("index"))
 
+        # Отправляем уведомления
         for sender, texts in grouped_sms.items():
             full_text = "".join(texts)
             safe_sender = sender.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("]", "\\]")
@@ -273,6 +279,7 @@ class ModemController:
             msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
             self.notifier.send_message(msg)
 
+        # Удаляем абсолютно все найденные сообщения (и успешные, и битые)
         for idx in indices_to_delete:
             self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
 
@@ -305,7 +312,6 @@ class ModemController:
         msg = f"📞 *Входящий звонок*\n👤 От: `{final_sender}`"
         self.notifier.send_message(msg)
 
-        # Используем переменную окружения для длительности входящего звонка до сброса
         time.sleep(INCOMING_CALL_DURATION)
         self._send_at_command(b"AT+CHUP\r\n")
         if self.ser: self.ser.reset_input_buffer()
@@ -317,7 +323,6 @@ class ModemController:
         self.ser.write(f"AT+CMGS={pdu_len}\r\n".encode())
 
         self.ser.timeout = 3.0
-        # Ждем символ приглашения
         prompt = self.ser.read_until(b"> ")
         if b">" not in prompt:
             logger.error(f"Нет символа '>' от модема. Ответ: {prompt.decode(errors='ignore')}")
@@ -327,7 +332,6 @@ class ModemController:
         self.ser.write((pdu_data + "\x1A").encode())
 
         self.ser.timeout = 15.0
-        # Ждем ответа OK или ERROR
         response = b""
         while True:
             line = self.ser.readline()
@@ -348,12 +352,9 @@ class ModemController:
         self.notifier.send_message(f"✅ Звонок-сброс на `{number}` завершен.")
 
     def send_sms(self, number: str, text: str) -> None:
-        """Отправляет SMS (одинарное или разбитое) используя python-messaging"""
         self.notifier.send_message(f"⏳ Формирование PDU и отправка на `{number}`...")
 
         try:
-            # SmsSubmit сам решит, использовать ли UCS2 (для кириллицы)
-            # и сам разобьет длинное сообщение на массив PDU
             sms = SmsSubmit(number, text)
             pdus = sms.to_pdu()
             total = len(pdus)
@@ -363,38 +364,28 @@ class ModemController:
 
                 pdu_hex = pdu_obj.pdu.upper()
 
-                # Если библиотека не добавила SMS-центр (SMSC), добавляем "00"
-                # "00" означает, что модем должен взять SMSC по умолчанию из настроек SIM-карты
                 if not pdu_hex.startswith("00") and not pdu_hex.startswith("0791"):
                     pdu_hex = "00" + pdu_hex
 
-                # === Точный ручной подсчет длины для AT+CMGS ===
-                # 1. Получаем длину SMSC в байтах (это первые 2 символа HEX-строки)
                 smsc_len_bytes = int(pdu_hex[:2], 16)
-
-                # 2. Считаем общую длину всей PDU-строки в байтах (2 hex символа = 1 байт)
                 total_pdu_bytes = len(pdu_hex) // 2
-
-                # 3. Длина для модема = Общая длина минус (байт длины SMSC + сами данные SMSC)
                 actual_length = total_pdu_bytes - (1 + smsc_len_bytes)
 
                 logger.info(f"PDU ({len(pdu_hex)} chars): {pdu_hex}")
-                logger.info(f"Вычисленная длина для AT+CMGS: {actual_length} (Библиотечная была: {pdu_obj.length})")
 
-                # Отправляем с нашей вычисленной длиной и строкой
                 success = self._send_pdu_to_modem(actual_length, pdu_hex)
 
                 if not success:
                     raise Exception(f"Ошибка при отправке части {i} из {total}")
 
                 if i < total:
-                    time.sleep(2)  # Пауза между отправкой частей (рекомендуется для модемов)
+                    time.sleep(2)
 
             self.notifier.send_message(f"✅ СМС ({total} частей) успешно отправлено на `{number}`")
         except Exception as e:
             logger.error(f"Критическая ошибка при отправке SMS: {e}")
             self.notifier.send_message(f"❌ Ошибка отправки СМС: {e}")
-            self._send_at_command(b"\x1B")  # Сброс состояния модема на всякий случай
+            self._send_at_command(b"\x1B")
 
     def process_telegram_command(self, cmd_text: str) -> None:
         parts = cmd_text.split(maxsplit=2)
