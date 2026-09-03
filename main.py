@@ -170,7 +170,7 @@ class ModemController:
         self._init_modem()
         logger.info("Модем инициализирован и готов к работе.")
 
-        # Проверка непрочитанных СМС при старте (они же будут удалены при прочтении)
+        # Проверка непрочитанных СМС при старте
         try:
             logger.info("Проверка пропущенных СМС в памяти...")
             self.process_all_unread_sms()
@@ -190,6 +190,7 @@ class ModemController:
         if not self.ser or not self.ser.is_open:
             return None
         try:
+            logger.debug(f">>> TX: {command}")
             self.ser.write(command)
             self.ser.timeout = timeout
 
@@ -201,7 +202,9 @@ class ModemController:
                 if b"OK\r\n" in response or b"ERROR\r\n" in response:
                     break
 
-            return response.decode("utf-8", errors="ignore")
+            decoded_response = response.decode("utf-8", errors="ignore")
+            logger.debug(f"<<< RX: {repr(decoded_response)}")
+            return decoded_response
         except (serial.SerialException, OSError, BrokenPipeError) as e:
             logger.warning(f"Ошибка при отправке команды {command}: {e}")
             return None
@@ -225,15 +228,15 @@ class ModemController:
         if not self.ser: return
         self.ser.reset_input_buffer()
 
-        # Всегда запрашиваем ВСЕ сообщения (AT+CMGL=4).
-        # Это гарантирует, что мы найдем даже те СМС, которые были прочитаны, но не удалились из-за сбоя.
+        logger.debug(f">>> TX: b'AT+CMGL=4\\r\\n'")
         self.ser.write(b"AT+CMGL=4\r\n")
         time.sleep(1.5)
         response = self.ser.read_until(b"OK\r\n").decode("utf-8", errors="ignore")
+        logger.debug(f"<<< RX (CMGL): {repr(response)}")
 
         lines = response.split("\r\n")
         messages_to_process: List[Tuple[str, str]] = []
-        indices_to_delete = set()  # Используем set, чтобы избежать дубликатов индексов
+        indices_to_delete = set()
 
         i = 0
         while i < len(lines):
@@ -242,9 +245,6 @@ class ModemController:
                 match = re.search(r"\+CMGL:\s*(\d+)\s*,\s*(\d+)", line)
                 if match:
                     idx = match.group(1)
-
-                    # ГАРАНТИЯ УДАЛЕНИЯ: Добавляем индекс в список на удаление СРАЗУ,
-                    # независимо от того, сможем ли мы потом его расшифровать или нет.
                     indices_to_delete.add(idx)
 
                     if i + 1 < len(lines):
@@ -279,7 +279,7 @@ class ModemController:
             msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
             self.notifier.send_message(msg)
 
-        # Удаляем абсолютно все найденные сообщения (и успешные, и битые)
+        # Удаляем обработанные сообщения
         for idx in indices_to_delete:
             self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
 
@@ -320,15 +320,20 @@ class ModemController:
 
     def _send_pdu_to_modem(self, pdu_len: int, pdu_data: str) -> bool:
         self.ser.reset_input_buffer()
-        self.ser.write(f"AT+CMGS={pdu_len}\r\n".encode())
+        cmd = f"AT+CMGS={pdu_len}\r\n".encode()
+        logger.debug(f">>> TX: {cmd}")
+        self.ser.write(cmd)
 
         self.ser.timeout = 3.0
         prompt = self.ser.read_until(b"> ")
+        logger.debug(f"<<< RX: {prompt}")
+
         if b">" not in prompt:
             logger.error(f"Нет символа '>' от модема. Ответ: {prompt.decode(errors='ignore')}")
             self.ser.write(b"\x1B")  # ESC
             return False
 
+        logger.debug(f">>> TX (PDU DATA): {pdu_data}<CTRL-Z>")
         self.ser.write((pdu_data + "\x1A").encode())
 
         self.ser.timeout = 15.0
@@ -337,6 +342,7 @@ class ModemController:
             line = self.ser.readline()
             response += line
             if b"OK\r\n" in response:
+                logger.debug(f"<<< RX: {repr(response.decode('utf-8', errors='ignore'))}")
                 return True
             if b"ERROR\r\n" in response or line == b"":  # пустая строка = таймаут
                 logger.error(f"Ошибка/таймаут от модема: {response.decode(errors='ignore')}")
@@ -426,16 +432,24 @@ class ModemController:
                     pass
 
                 try:
-                    line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                    raw_line = self.ser.readline()
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
                 except UnicodeDecodeError:
                     continue
 
                 if not line:
                     continue
 
+                # Логируем все непустые строки, поступающие от модема вне опросов (URC)
+                logger.debug(f"<<< URC: {line}")
+
                 if line.startswith("+CMT:"):
                     try:
-                        text = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                        text_raw = self.ser.readline()
+                        text = text_raw.decode("utf-8", errors="ignore").strip()
+                        logger.debug(f"<<< URC (CMT payload): {text}")
                         sender_match = re.search(r'"([^"]+)"', line)
                         sender = sender_match.group(1) if sender_match else "Неизвестный"
                         self.notifier.send_message(f"📩 *Новое СМС*\n👤 От: `{sender}`\n💬 Текст: {text}")
