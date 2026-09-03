@@ -2,47 +2,48 @@
 
 # Forward SMS & Calls to Telegram
 
-A service for automatically forwarding incoming SMS messages and call notifications from a USB/GSM modem directly to Telegram.
+A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS and make ring-and-drop calls** (pinging) directly via Telegram commands.
 
-The application works via a serial port (AT commands), allowing you to use most popular USB modems (Huawei, ZTE, Quectel, etc.) to build notification systems, SMS gateways, or integrate with smart home systems.
+The application communicates via a serial port (using AT commands), which makes it compatible with most popular USB modems (Huawei, ZTE, Quectel, etc.) for building notification systems, SMS gateways, or smart home integrations.
 
 ## 🚀 Features
-* 📩 Forwarding the text of incoming SMS messages.
-* 📞 Incoming call notifications (sends the phone number).
-* 🐳 Ready to run in Docker.
-* ⚙️ Flexible configuration via environment variables.
+* 📩 **Incoming SMS:** Automatic forwarding of incoming SMS text to Telegram (supports concatenating long messages and Unicode/Cyrillic).
+* 📥 **Missed SMS:** Reads unread messages from the modem's memory when the container starts.
+* 📞 **Incoming calls:** Notifications for incoming calls (sends the caller's phone number) and automatically drops the call after a specified delay.
+* ✉️ **Sending SMS:** Send messages to any number directly from the chat with the bot.
+* ☎️ **Outgoing calls:** Command to make a ring-and-drop call (the bot dials the specified number and hangs up after a set time).
+* 🐳 Ready to run in Docker with flexible configuration via environment variables.
 
 ---
 
-## ⚠️ Host System Preparation (Important for Some Modems)
+## 💬 Telegram Bot Commands
 
-Many modern 3G/4G USB modems, when plugged into a computer, are detected as a virtual CD-ROM with drivers rather than as a modem. To switch the device into modem mode and expose the required serial ports (e.g., `/dev/ttyUSB0`, `/dev/ttyUSB2`), special utilities must be installed on the host machine.
+Send the following commands to your Telegram bot:
 
-If your modem is not detected correctly, run the following on the host machine:
-
-```bash
-sudo apt update
-sudo apt install usb-modeswitch usb-modeswitch-data
-```
-
-*After installing the utilities, unplug and re-plug the USB modem. Verify that the ports have appeared with the command `ls /dev/ttyUSB*`.*
+* `/help` or `/start` — Show help for available commands.
+* `/call <number>` — Make an outgoing ring-and-drop call. (Example: `/call +79991234567`)
+* `/sms <number> <text>` — Send an SMS. (Example: `/sms +79991234567 Hello, this is a test!`)
 
 ---
 
 ## ⚙️ Environment Variables
 
-| Variable | Description | Example |
+| Variable | Default | Description |
 | :--- | :--- | :--- |
-| `SERIAL_PORT` | Path to the modem's serial port inside the container. Typically, this is the port handling AT commands (often `ttyUSB2` or `ttyUSB0`). | `/dev/ttyUSB2` |
-| `TG_TOKEN` | Your Telegram bot token (obtained from [@BotFather](https://t.me/BotFather)). | `785432109:AAE1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P` |
-| `TG_CHAT_ID` | ID of the chat, group, or user where SMS and calls will be forwarded. | `123456789` |
-| `LOG_LEVEL` | Log verbosity level. Available values: `DEBUG`, `INFO`, `WARNING`, `ERROR`. | `DEBUG` |
+| `TG_TOKEN` | *(required)* | Your Telegram bot token (obtained from [@BotFather](https://t.me/BotFather)). |
+| `TG_CHAT_ID` | *(required)* | ID of the chat, group, or user to receive notifications. |
+| `SERIAL_PORT` | `/dev/ttyUSB2` | Path to the modem's serial port inside the container (AT port). |
+| `BAUD_RATE` | `115200` | Baud rate for the modem port connection. |
+| `OUTGOING_CALL_DURATION` | `5.0` | Duration of an outgoing call in seconds before auto-hangup (`/call`). |
+| `INCOMING_CALL_DURATION` | `2.0` | Delay in seconds before the bot drops an incoming call. |
+| `CLIP_DEBOUNCE_TIME` | `10.0` | Anti-spam filter (in seconds) for incoming calls from the same number. |
+| `LOG_LEVEL` | `INFO` | Log verbosity level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Set to `DEBUG` to view raw AT commands. |
 
 ---
 
-## 🐳 Running via Docker Compose
+## 🐳 Run via Docker Compose
 
-Create a `docker-compose.yml` file and add the following configuration:
+Create a `docker-compose.yml` file and add the following configuration to it:
 
 ```yaml
 services:
@@ -55,46 +56,10 @@ services:
       - "/dev/ttyUSB2:/dev/ttyUSB2"
     environment:
       - SERIAL_PORT=/dev/ttyUSB2
+      - BAUD_RATE=115200
       - TG_TOKEN=785432109:AAE1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P
       - TG_CHAT_ID=123456789
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
+      - OUTGOING_CALL_DURATION=5.0
+      - INCOMING_CALL_DURATION=2.0
 ```
-
-### Running:
-```bash
-# Run in detached mode
-docker compose up -d
-
-# View logs
-docker compose logs -f forward-sms-calls-to-telegram
-```
-
----
-
-## 📱 How to Get TG_TOKEN and TG_CHAT_ID?
-
-1. **Bot Token (`TG_TOKEN`):**
-   * Find the [@BotFather](https://t.me/BotFather) bot on Telegram.
-   * Send the `/newbot` command and follow the instructions.
-   * Copy the token you receive (format: `123456789:ABCdefGHI...`).
-
-2. **Chat ID (`TG_CHAT_ID`):**
-   * Find the [@userinfobot](https://t.me/userinfobot) or [@getmyid_bot](https://t.me/getmyid_bot) bot on Telegram.
-   * Send it any message, and it will reply with your personal ID.
-   * *To send messages to a group:* add the bot to the group, send a message in the group, and the bot will reply with the group's ID (usually starts with a minus, e.g., `-1001234567890`).
-
----
-
-## 🛠️ Troubleshooting
-
-1. **Container crashes with `Permission denied` or `device not found`:**
-   * Make sure the modem is connected and the port exists (`ls /dev/ttyUSB*`).
-   * Verify that the `root` user (or whoever runs Docker) has read/write permissions for the device. As a last resort, you can add `privileged: true` to `docker-compose.yml`, but mapping a specific device (`devices`) is safer.
-
-2. **Modem returns errors to AT commands:**
-   * Different modems may have AT commands on different ports. If `ttyUSB2` doesn't respond, try changing `SERIAL_PORT` to `/dev/ttyUSB0` or `/dev/ttyUSB1` (don't forget to update the `devices` mapping in the compose file).
-   * The AT command port is usually identified via `dmesg | grep ttyUSB` (look for the port detected as "Modem" or "AT Port").
-
-3. **SMS aren't arriving even though the modem is online:**
-   * Make sure the SIM card is active, has balance, and the SMS memory isn't full (on some modems, you need to manually clear the storage).
-   * Enable `LOG_LEVEL=DEBUG` and check the output of `docker compose logs` to see the modem's raw response to AT commands.
