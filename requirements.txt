@@ -1,3 +1,4 @@
+messaging==1.2
 pyserial==3.5
 python-dotenv==1.2.3
 Requests==2.34.2
