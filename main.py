@@ -304,7 +304,7 @@ class ModemController:
     def _send_pdu_to_modem(self, pdu_len: int, pdu_data: str) -> bool:
         """Отправляет сырой PDU-блок на модем с контролем приглашения '>'"""
         self.ser.reset_input_buffer()
-        self.ser.write(f"AT+CMGS={pdu_len}\r".encode())
+        self.ser.write(f"AT+CMGS={pdu_len}\r\n".encode())
 
         expected = b">"
         t_end = time.time() + 3.0
@@ -319,7 +319,9 @@ class ModemController:
             time.sleep(0.1)
 
         if not prompt_ok:
-            logger.error("Нет символа '>' от модема.")
+            # Декодируем буфер, чтобы увидеть реальную ошибку (например, ERROR или +CMS ERROR)
+            modem_reply = buffer.decode(errors='ignore').strip()
+            logger.error(f"Нет символа '>' от модема. Ответ модема: '{modem_reply}'")
             self.ser.write(b"\x1B")  # ESC для отмены
             return False
 
@@ -363,6 +365,7 @@ class ModemController:
 
             for i, pdu_obj in enumerate(pdus, 1):
                 logger.info(f"Отправка части SMS {i}/{total} на номер {number}...")
+                logger.info(f"Длина PDU: {pdu_obj.length}, PDU: {pdu_obj.pdu}")
 
                 # В библиотеке pdu_obj.length — это правильная длина (без учета байта SMSC),
                 # а pdu_obj.pdu — это готовая HEX-строка
