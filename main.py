@@ -175,16 +175,20 @@ class ModemController:
 
     def connect(self) -> None:
         logger.info(f"Открытие порта {self.port}...")
-        self.ser = serial.Serial(self.port, self.baud_rate, timeout=1, rtscts=True, dsrdtr=True)
-        time.sleep(2)
-        self._init_modem()
-        logger.info("Модем инициализирован и готов к работе.")
-
         try:
-            logger.info("Проверка пропущенных СМС в памяти...")
-            self.process_all_unread_sms()
-        except Exception as e:
-            logger.error(f"Ошибка при стартовой проверке СМС: {e}")
+            self.ser = serial.Serial(self.port, self.baud_rate, timeout=1, rtscts=True, dsrdtr=True)
+            time.sleep(2)
+            self._init_modem()
+            logger.info("Модем инициализирован и готов к работе.")
+
+            try:
+                logger.info("Проверка пропущенных СМС в памяти...")
+                self.process_all_unread_sms()
+            except Exception as e:
+                logger.error(f"Ошибка при стартовой проверке СМС: {e}")
+        except Exception:
+            self.disconnect()
+            raise
 
     def disconnect(self) -> None:
         if self.ser and self.ser.is_open:
@@ -194,6 +198,68 @@ class ModemController:
             except Exception as e:
                 logger.warning(f"Ошибка при закрытии порта: {e}")
         self.ser = None
+
+    def reboot(self) -> bool:
+        """Перезапуск модема с помощью команды AT+CFUN=1,1 и ожидание восстановления COM-порта."""
+        logger.info("Инициирован перезапуск модема командой AT+CFUN=1,1...")
+        self.notifier.send_message("♻️ Перезагрузка модема (`AT+CFUN=1,1`)... Ожидание переподключения COM-порта.")
+
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.write(b"AT+CFUN=1,1\r\n")
+                try:
+                    self.ser.flush()
+                except Exception:
+                    pass
+                time.sleep(1)
+        except Exception as e:
+            logger.warning(f"Ошибка отправки AT+CFUN=1,1 (возможно, порт уже закрыт): {e}")
+
+        self.disconnect()
+        return self._wait_for_reconnect(timeout=60)
+
+    def _wait_for_reconnect(self, timeout: int = 60) -> bool:
+        """Ожидает перезапуска модема, переподключения COM-порта и его повторной инициализации."""
+        logger.info(f"Ожидание восстановления порта {self.port} (таймаут {timeout} сек)...")
+        # Начальная задержка: даем физическому USB-устройству время на сброс
+        time.sleep(5)
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if not self.is_running:
+                return False
+            try:
+                logger.debug(f"Попытка переподключения к {self.port}...")
+                self.ser = serial.Serial(self.port, self.baud_rate, timeout=1, rtscts=True, dsrdtr=True)
+                time.sleep(1)
+
+                # Проверяем готовность модема базовой командой AT
+                resp = self._send_at_command(b"AT\r\n", timeout=1.0)
+                if resp and "OK" in resp:
+                    logger.info("Модем ответил OK на команду AT.")
+                    time.sleep(1)
+                    self._init_modem()
+                    logger.info("Модем успешно переподключен и готов к работе.")
+
+                    try:
+                        self.process_all_unread_sms()
+                    except Exception as e:
+                        logger.error(f"Ошибка проверки СМС после перезагрузки: {e}")
+
+                    self.notifier.send_message("✅ Модем успешно перезагружен и готов к работе!")
+                    return True
+                else:
+                    logger.debug("Порт открыт, но модем ещё не отвечает OK на AT.")
+                    self.disconnect()
+            except (serial.SerialException, OSError) as e:
+                logger.debug(f"Порт {self.port} пока недоступен: {e}")
+                self.disconnect()
+
+            time.sleep(2)
+
+        logger.error(f"Не удалось восстановить связь с модемом за {timeout} секунд.")
+        self.notifier.send_message(f"❌ Не удалось восстановить связь с модемом по порту `{self.port}` после перезагрузки.")
+        raise serial.SerialException(f"Таймаут восстановления связи после перезагрузки ({timeout}с)")
 
     def stop(self) -> None:
         self.is_running = False
@@ -217,7 +283,7 @@ class ModemController:
             decoded = response.decode("utf-8", errors="ignore")
             logger.debug(f"<<< RX: {repr(decoded)}")
             return decoded
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             logger.warning(f"Ошибка отправки команды: {e}")
             return None
 
@@ -426,12 +492,16 @@ class ModemController:
             if resp and "ERROR" in resp:
                 self.notifier.send_message("❌ Ошибка USSD: Модем отверг запрос (ERROR).")
 
+        elif action == "/reboot":
+            self.reboot()
+
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
                 "📞 `/call +7999...` — Звонок-сброс\n"
                 "✉️ `/sms +7999... Текст` — Отправить SMS\n"
                 "💰 `/ussd *100#` — Запрос баланса / USSD\n"
+                "♻️ `/reboot` — Перезапуск модема (AT+CFUN=1,1)\n"
             )
             self.notifier.send_message(help_msg)
         else:

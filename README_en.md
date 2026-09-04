@@ -25,6 +25,7 @@ Send the following commands to your Telegram bot:
 * `/call <number>` — Make an outgoing ring-and-drop call. (Example: `/call +79991234567`)
 * `/sms <number> <text>` — Send an SMS. (Example: `/sms +79991234567 Hello, this is a test!`)
 * `/ussd <code>` — Send a USSD request. (Example: `/ussd *100#` or `/ussd *102#`)
+* `/reboot` — Reboot modem via `AT+CFUN=1,1` with automatic COM port reconnection.
 
 ---
 
