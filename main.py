@@ -432,7 +432,7 @@ class ModemController:
             )
             self.notifier.send_message(help_msg)
         else:
-            self.notifier.send_message("❌ Команда не распознана. Жми `/help`.")
+            self.notifier.send_message("❌ Команда не распознана. Жми /help")
 
     def run(self) -> None:
         self.connect()
