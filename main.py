@@ -178,6 +178,7 @@ class ModemController:
         try:
             self.ser = serial.Serial(self.port, self.baud_rate, timeout=1, rtscts=True, dsrdtr=True)
             time.sleep(2)
+            self._wait_for_modem_ready(timeout=25)
             self._init_modem()
             logger.info("Модем инициализирован и готов к работе.")
 
@@ -238,6 +239,7 @@ class ModemController:
                 if resp and "OK" in resp:
                     logger.info("Модем ответил OK на команду AT.")
                     time.sleep(1)
+                    self._wait_for_modem_ready(timeout=25)
                     self._init_modem()
                     logger.info("Модем успешно переподключен и готов к работе.")
 
@@ -287,11 +289,56 @@ class ModemController:
             logger.warning(f"Ошибка отправки команды: {e}")
             return None
 
+    def _wait_for_modem_ready(self, timeout: int = 25) -> bool:
+        """Ожидает готовности SIM-карты (+CPIN: READY) и подсистемы SMS (AT+CPMS?)."""
+        logger.info("Проверка готовности SIM-карты (AT+CPIN?)...")
+        start = time.time()
+
+        # 1. Проверяем статус SIM (+CPIN: READY)
+        sim_ready = False
+        while time.time() - start < timeout:
+            resp = self._send_at_command(b"AT+CPIN?\r\n", timeout=1.0)
+            if resp and "+CPIN: READY" in resp:
+                sim_ready = True
+                logger.info("SIM-карта готова (+CPIN: READY).")
+                break
+            elif resp and "SIM PIN" in resp:
+                logger.error("SIM-карта требует ввода PIN-кода!")
+                break
+            time.sleep(1)
+
+        if not sim_ready:
+            logger.warning("SIM-карта не перешла в состояние READY за отведенное время.")
+
+        # 2. Ожидаем готовности SMS-подсистемы (пока AT+CPMS? не вернет ответ без ошибки 500)
+        logger.info("Проверка готовности подсистемы SMS (AT+CPMS?)...")
+        sms_ready = False
+        while time.time() - start < timeout:
+            resp = self._send_at_command(b"AT+CPMS?\r\n", timeout=1.0)
+            if resp and "+CPMS:" in resp and "ERROR" not in resp:
+                sms_ready = True
+                logger.info(f"Подсистема SMS готова: {resp.strip()}")
+                break
+            time.sleep(1)
+
+        if not sms_ready:
+            logger.warning("Подсистема SMS не ответила на AT+CPMS? вовремя.")
+
+        return sim_ready and sms_ready
+
+    def _setup_sms_storage(self) -> None:
+        """Настраивает хранилище SMS: пробует ME, при ошибке откатывается на SM."""
+        resp = self._send_at_command(b'AT+CPMS="ME","ME","ME"\r\n', timeout=2.0)
+        if resp and "OK" in resp:
+            logger.info("Установлено хранилище SMS: ME (память модема).")
+        else:
+            logger.info("Хранилище ME недоступно или не поддерживается, переключаем на SM (SIM-карта)...")
+            self._send_at_command(b'AT+CPMS="SM","SM","SM"\r\n', timeout=2.0)
+
     def _init_modem(self) -> None:
         commands = [
             b"AT\r\n",
             b"ATE0\r\n",
-            b'AT+CPMS="ME","ME","ME"\r\n',
             b'AT^STSF=0\r\n',
             b"AT+CMGF=0\r\n",
             b"AT+CLIP=1\r\n",
@@ -299,11 +346,15 @@ class ModemController:
         ]
         if log_level != logging.DEBUG:
             commands.append(b"AT^CURC=0\r\n")
-        else:commands.append(b"AT^CURC=1\r\n")
+        else:
+            commands.append(b"AT^CURC=1\r\n")
 
         for cmd in commands:
             if self._send_at_command(cmd) is None:
                 raise serial.SerialException(f"Модем не отвечает на {cmd}")
+
+        self._setup_sms_storage()
+
         if self.ser:
             self.ser.reset_input_buffer()
 
