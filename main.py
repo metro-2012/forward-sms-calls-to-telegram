@@ -225,7 +225,8 @@ class ModemController:
         commands = [
             b"AT\r\n",
             b"ATE0\r\n",
-            b'AT+CPMS="ME","ME","ME"\r\n',
+            #b'AT+CPMS="ME","ME","ME"\r\n',
+            b'AT^STSF=0\r\n',
             b"AT+CMGF=0\r\n",
             b"AT+CLIP=1\r\n",
             b"AT+CNMI=2,1,0,0,0\r\n"
