@@ -37,6 +37,7 @@ Send the following commands to your Telegram bot:
 | `TG_CHAT_ID` | *(required)* | ID of the chat, group, or user to receive notifications. |
 | `SERIAL_PORT` | `/dev/ttyUSB2` | Path to the modem's serial port inside the container (AT port). |
 | `BAUD_RATE` | `115200` | Baud rate for the modem port connection. |
+| `SIM_PIN` | *(none)* | PIN code for the SIM card (if set). If provided, the script will automatically unlock the SIM card. |
 | `OUTGOING_CALL_DURATION` | `5.0` | Duration of an outgoing call in seconds before auto-hangup (`/call`). |
 | `INCOMING_CALL_DURATION` | `2.0` | Delay in seconds before the bot drops an incoming call. |
 | `CLIP_DEBOUNCE_TIME` | `10.0` | Anti-spam filter (in seconds) for incoming calls from the same number. |
@@ -60,6 +61,7 @@ services:
     environment:
       - SERIAL_PORT=/dev/ttyUSB2
       - BAUD_RATE=115200
+      - SIM_PIN=1234
       - TG_TOKEN=785432109:AAE1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P
       - TG_CHAT_ID=123456789
       - LOG_LEVEL=INFO

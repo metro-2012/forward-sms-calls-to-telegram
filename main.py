@@ -40,6 +40,7 @@ except ImportError:
 # ================= НАСТРОЙКИ ИЗ ОКРУЖЕНИЯ =================
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+SIM_PIN = os.getenv("SIM_PIN")
 
 if not TG_TOKEN or not TG_CHAT_ID:
     print("❌ ОШИБКА: Не заданы обязательные переменные окружения!", file=sys.stderr)
@@ -303,8 +304,18 @@ class ModemController:
                 logger.info("SIM-карта готова (+CPIN: READY).")
                 break
             elif resp and "SIM PIN" in resp:
-                logger.error("SIM-карта требует ввода PIN-кода!")
-                break
+                if SIM_PIN:
+                    logger.info(f"SIM-карта требует PIN-код. Вводим PIN: {SIM_PIN}")
+                    pin_resp = self._send_at_command(f'AT+CPIN="{SIM_PIN}"\r\n'.encode(), timeout=2.0)
+                    if pin_resp and "OK" in pin_resp:
+                        logger.info("PIN-код отправлен. Ожидаем готовности...")
+                        time.sleep(2)
+                    else:
+                        logger.error("Ошибка при вводе PIN-кода! Возможно, неверный PIN.")
+                        break
+                else:
+                    logger.error("SIM-карта требует ввода PIN-кода, но переменная окружения SIM_PIN не задана!")
+                    break
             time.sleep(1)
 
         if not sim_ready:
