@@ -3,5 +3,4 @@ pyserial==3.5
 python-dotenv==1.2.3
 python_messaging==0.5.13
 Requests==2.34.2
-smspdudecoder==2.2.0
 urllib3==2.7.0
