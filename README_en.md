@@ -41,6 +41,7 @@ Send the following commands to your Telegram bot:
 | `OUTGOING_CALL_DURATION` | `5.0` | Duration of an outgoing call in seconds before auto-hangup (`/call`). |
 | `INCOMING_CALL_DURATION` | `2.0` | Delay in seconds before the bot drops an incoming call. |
 | `CLIP_DEBOUNCE_TIME` | `10.0` | Anti-spam filter (in seconds) for incoming calls from the same number. |
+| `MULTIPART_SMS_TIMEOUT` | `15.0` | Timeout (in seconds) for waiting for all parts of a concatenated SMS before sending what was received. |
 | `LOG_LEVEL` | `INFO` | Log verbosity level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Set to `DEBUG` to view raw AT commands. |
 
 ---
@@ -68,4 +69,5 @@ services:
       - OUTGOING_CALL_DURATION=5.0
       - INCOMING_CALL_DURATION=2.0
       - CLIP_DEBOUNCE_TIME=10.0
+      - MULTIPART_SMS_TIMEOUT=15.0
 ```

@@ -41,6 +41,7 @@
 | `OUTGOING_CALL_DURATION` | `5.0` | Продолжительность исходящего звонка в секундах до авто-сброса (`/call`). |
 | `INCOMING_CALL_DURATION` | `2.0` | Задержка в секундах перед тем, как бот сбросит входящий вызов. |
 | `CLIP_DEBOUNCE_TIME` | `10.0` | Антиспам-фильтр (в сек.) для входящих звонков с одного и того же номера. |
+| `MULTIPART_SMS_TIMEOUT` | `15.0` | Таймаут (в сек.) ожидания всех частей длинного составного СМС перед частичной отправкой. |
 | `LOG_LEVEL` | `INFO` | Уровень детализации логов (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Установите `DEBUG` для просмотра AT-команд. |
 
 ---
@@ -68,4 +69,5 @@ services:
       - OUTGOING_CALL_DURATION=5.0
       - INCOMING_CALL_DURATION=2.0
       - CLIP_DEBOUNCE_TIME=10.0
+      - MULTIPART_SMS_TIMEOUT=15.0
 ```
