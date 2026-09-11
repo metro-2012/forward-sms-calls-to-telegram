@@ -9,7 +9,8 @@ from typing import Optional, Dict, Any, List, Tuple
 import serial
 
 from config import (
-    SIM_PIN, CLIP_DEBOUNCE_TIME, OUTGOING_CALL_DURATION, INCOMING_CALL_DURATION, LOG_LEVEL
+    SIM_PIN, CLIP_DEBOUNCE_TIME, OUTGOING_CALL_DURATION, INCOMING_CALL_DURATION, LOG_LEVEL,
+    MULTIPART_SMS_TIMEOUT
 )
 from telegram import TelegramNotifier
 
@@ -54,6 +55,7 @@ class ModemController:
         self.ser: Optional[serial.Serial] = None
         self.last_call_info: Dict[str, Any] = {"number": None, "timestamp": 0.0}
         self.is_running = False
+        self.incomplete_sms_tracker: Dict[Tuple[str, int], float] = {}
 
     def connect(self) -> None:
         logger.info(f"Открытие порта {self.port}...")
@@ -271,28 +273,93 @@ class ModemController:
                             i += 1
             i += 1
 
-        grouped_sms = defaultdict(list)
+        single_sms = []
+        multipart_sms = defaultdict(list)
+
         for idx, pdu_hex in messages_to_process:
             try:
                 sms = SmsDeliver(pdu_hex).data
                 sender = sms.get("number", "Неизвестный")
                 text = sms.get("text", "")
-                if text:
-                    grouped_sms[sender].append((idx, text))
+
+                if not text:
+                    continue
+
+                if "ref" in sms and "seq" in sms and "cnt" in sms:
+                    ref = sms["ref"]
+                    seq = sms["seq"]
+                    cnt = sms["cnt"]
+                    multipart_sms[(sender, ref)].append({
+                        "idx": idx,
+                        "seq": seq,
+                        "cnt": cnt,
+                        "text": text
+                    })
+                else:
+                    single_sms.append({
+                        "idx": idx,
+                        "sender": sender,
+                        "text": text
+                    })
             except Exception as e:
                 logger.error(f"Ошибка декодирования PDU (индекс {idx}): {e}")
 
-        for sender, items in grouped_sms.items():
-            full_text = "".join([item[1] for item in items])
-            indices_to_delete = [item[0] for item in items]
+        current_time = time.time()
+
+
+        for msg_info in single_sms:
+            sender = msg_info["sender"]
+            text = msg_info["text"]
+            idx = msg_info["idx"]
 
             safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
-            safe_text = full_text.replace("_", "\\_").replace("*", "\\*")
+            safe_text = text.replace("_", "\\_").replace("*", "\\*")
             msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
 
             if self.notifier.send_message(msg):
-                for idx in indices_to_delete:
-                    self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+
+        for key, parts in multipart_sms.items():
+            sender, ref = key
+            cnt = parts[0]["cnt"]
+
+            if len(parts) >= cnt:
+                parts.sort(key=lambda p: p["seq"])
+                full_text = "".join([p["text"] for p in parts])
+                indices_to_delete = [p["idx"] for p in parts]
+
+                safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
+                safe_text = full_text.replace("_", "\\_").replace("*", "\\*")
+                msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+
+                if self.notifier.send_message(msg):
+                    for idx in indices_to_delete:
+                        self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+
+                self.incomplete_sms_tracker.pop(key, None)
+            else:
+                if key not in self.incomplete_sms_tracker:
+                    self.incomplete_sms_tracker[key] = current_time
+                    logger.info(f"Получены не все части СМС ({len(parts)}/{cnt}) от {sender}. Ждем остальные.")
+                elif current_time - self.incomplete_sms_tracker[key] > MULTIPART_SMS_TIMEOUT:
+                    logger.warning(f"Таймаут ожидания частей СМС от {sender}. Отправляем то, что есть.")
+                    parts.sort(key=lambda p: p["seq"])
+                    full_text = "".join([f"[{p['seq']}/{cnt}] " + p["text"] for p in parts])
+                    indices_to_delete = [p["idx"] for p in parts]
+
+                    safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
+                    safe_text = full_text.replace("_", "\\_").replace("*", "\\*")
+                    msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+
+                    if self.notifier.send_message(msg):
+                        for idx in indices_to_delete:
+                            self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+
+                    self.incomplete_sms_tracker.pop(key, None)
+
+        keys_to_remove = [k for k in self.incomplete_sms_tracker if k not in multipart_sms]
+        for k in keys_to_remove:
+            self.incomplete_sms_tracker.pop(k, None)
 
     def handle_incoming_call(self, first_clip_line: str) -> None:
         final_sender = None

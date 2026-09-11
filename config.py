@@ -21,6 +21,7 @@ SIM_PIN = os.getenv("SIM_PIN")
 CLIP_DEBOUNCE_TIME = float(os.getenv("CLIP_DEBOUNCE_TIME", "10.0"))
 OUTGOING_CALL_DURATION = float(os.getenv("OUTGOING_CALL_DURATION", "5.0"))
 INCOMING_CALL_DURATION = float(os.getenv("INCOMING_CALL_DURATION", "2.0"))
+MULTIPART_SMS_TIMEOUT = float(os.getenv("MULTIPART_SMS_TIMEOUT", "15.0"))
 
 LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
