@@ -2,7 +2,7 @@
 
 # Forward SMS & Calls to Telegram
 
-A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS, make ring-and-drop calls** (pinging), and **send USSD requests** (check balance, etc.) directly via Telegram commands.
+A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS, make ring-and-drop calls** (pinging), and **send USSD requests** (check balance, etc.) via Telegram commands.
 
 The application communicates via a serial port (using AT commands), which makes it compatible with most popular USB modems (Huawei, ZTE, Quectel, etc.) for building notification systems, SMS gateways, or smart home integrations.
 
