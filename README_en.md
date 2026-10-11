@@ -2,6 +2,8 @@
 
 # Forward SMS & Calls to Telegram
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_3.0-blue.svg)](LICENSE)
+
 A service for integrating a USB/GSM modem with Telegram. The bot not only automatically forwards incoming SMS and notifies you of incoming calls, but also allows you to **send SMS, make ring-and-drop calls** (pinging), and **send USSD requests** (check balance, etc.) via Telegram commands.
 
 The application communicates via a serial port (using AT commands), which makes it compatible with most popular USB modems (Huawei, ZTE, Quectel, etc.) for building notification systems, SMS gateways, or smart home integrations.
@@ -71,3 +73,9 @@ services:
       - CLIP_DEBOUNCE_TIME=10.0
       - MULTIPART_SMS_TIMEOUT=15.0
 ```
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (GNU AGPLv3)** - see the [LICENSE](LICENSE) file for details.

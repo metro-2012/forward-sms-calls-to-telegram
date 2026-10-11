@@ -2,6 +2,8 @@
 
 # Forward SMS & Calls to Telegram
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_3.0-blue.svg)](LICENSE)
+
 Сервис для интеграции USB/GSM-модема с Telegram. Бот не только автоматически пересылает входящие SMS и уведомляет о звонках, но и позволяет **отправлять SMS, совершать звонки-сбросы** (дозвон) и **отправлять USSD-запросы** (проверка баланса и др.) через команды в Telegram.
 
 Приложение работает через serial-порт (AT-команды), что позволяет использовать большинство популярных USB-модемов (Huawei, ZTE, Quectel и др.) для создания систем уведомлений, SMS-шлюзов или интеграции с умным домом.
@@ -71,3 +73,9 @@ services:
       - CLIP_DEBOUNCE_TIME=10.0
       - MULTIPART_SMS_TIMEOUT=15.0
 ```
+
+---
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией **GNU Affero General Public License v3.0 (GNU AGPLv3)**. Подробности см. в файле [LICENSE](LICENSE).
