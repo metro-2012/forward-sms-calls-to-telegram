@@ -4,6 +4,7 @@ import re
 import logging
 import threading
 import queue
+import hashlib
 from collections import defaultdict
 from typing import Optional, Dict, Any, List, Tuple, Callable
 import serial
@@ -64,6 +65,10 @@ class ModemController:
         self.last_call_info: Dict[str, Any] = {"number": None, "timestamp": 0.0}
         self.is_running = False
         self.incomplete_sms_tracker: Dict[Tuple[str, int], float] = {}
+        self.problem_sms_retries: Dict[str, int] = {}
+        self.quarantine_records: List[Dict[str, Any]] = []
+        self.max_quarantine_records: int = 50
+        self.max_sms_retries: int = 2
 
     def connect(self) -> None:
         logger.info(f"Открытие порта {self.port}...")
@@ -268,6 +273,88 @@ class ModemController:
         if self.ser:
             self.ser.reset_input_buffer()
 
+    @staticmethod
+    def _escape_markdown(text: Any) -> str:
+        if not isinstance(text, str):
+            text = str(text)
+        return text.replace("_", "\\_").replace("*", "\\*")
+
+    def _safe_decode_sms_text(self, text: Any, dcs: Optional[int] = None) -> Tuple[str, bool]:
+        if isinstance(text, bytes):
+            for encoding in ("utf-8", "cp1251"):
+                try:
+                    candidate = text.decode(encoding)
+                    if all(c.isprintable() or c in "\r\n\t" for c in candidate):
+                        return candidate, False
+                except UnicodeDecodeError:
+                    pass
+
+            hex_data = text.hex().upper()
+            length = len(text)
+            if length > 140:
+                hex_preview = f"{hex_data[:120]}...{hex_data[-40:]}"
+                formatted = f"[Бинарные данные ({length} байт): {hex_preview}]"
+            else:
+                formatted = f"[Бинарные данные ({length} байт): {hex_data}]"
+            return formatted, True
+
+        if isinstance(text, str):
+            return text, False
+
+        return str(text), False
+
+    def _quarantine_sms(self, idx: str, pdu_hex: Optional[str], reason: str) -> None:
+        pdu_len = (len(pdu_hex) // 2) if pdu_hex else 0
+        pdu_hash = (
+            hashlib.sha256(pdu_hex.encode("ascii", errors="ignore")).hexdigest()[:16]
+            if pdu_hex else "N/A"
+        )
+
+        record = {
+            "timestamp": time.time(),
+            "idx": idx,
+            "reason": reason,
+            "pdu_len": pdu_len,
+            "pdu_sha256": pdu_hash,
+        }
+
+        self.quarantine_records.append(record)
+        if len(self.quarantine_records) > self.max_quarantine_records:
+            self.quarantine_records.pop(0)
+
+        logger.warning(
+            f"SMS (индекс {idx}) помещено в карантин и удаляется из модема: {reason} "
+            f"(PDU len: {pdu_len}, SHA256: {pdu_hash})"
+        )
+
+        self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+        self.problem_sms_retries.pop(idx, None)
+
+        safe_reason = self._escape_markdown(reason)
+        msg = (
+            f"⚠️ *Проблемное SMS изолировано*\n"
+            f"Индекс: `{idx}`\n"
+            f"Причина: `{safe_reason}`\n"
+            f"Размер PDU: `{pdu_len}` байт, Хэш: `{pdu_hash}`\n"
+            f"_Сообщение удалено из модема для предотвращения блокировки очереди._"
+        )
+        try:
+            self.notifier.send_message(msg)
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление о карантине в Telegram: {e}")
+
+    def _handle_sms_failure(self, idx: str, pdu_hex: Optional[str], error: Exception) -> None:
+        retries = self.problem_sms_retries.get(idx, 0) + 1
+        self.problem_sms_retries[idx] = retries
+
+        if retries >= self.max_sms_retries:
+            self._quarantine_sms(idx, pdu_hex, f"Превышен лимит ошибок ({retries}): {error}")
+        else:
+            logger.warning(
+                f"Ошибка обработки SMS (индекс {idx}, попытка {retries}/{self.max_sms_retries}): {error}. "
+                f"Повтор при следующем цикле."
+            )
+
     def process_all_unread_sms(self) -> None:
         if not self.ser: return
         self.ser.reset_input_buffer()
@@ -293,16 +380,32 @@ class ModemController:
                             i += 1
             i += 1
 
-        single_sms = []
-        multipart_sms = defaultdict(list)
+        current_indices = {idx for idx, _ in messages_to_process}
+        for old_idx in list(self.problem_sms_retries.keys()):
+            if old_idx not in current_indices:
+                self.problem_sms_retries.pop(old_idx, None)
+
+        single_sms: List[Dict[str, Any]] = []
+        multipart_sms: Dict[Tuple[str, Any], List[Dict[str, Any]]] = defaultdict(list)
 
         for idx, pdu_hex in messages_to_process:
             try:
                 sms = SmsDeliver(pdu_hex).data
                 sender = sms.get("number", "Неизвестный")
                 text = sms.get("text", "")
+                dcs = sms.get("dcs")
+                fmt = sms.get("fmt")
 
-                if not text:
+                is_empty = False
+                if text is None:
+                    is_empty = True
+                elif isinstance(text, (str, bytes)) and len(text) == 0:
+                    is_empty = True
+
+                if is_empty:
+                    logger.info(f"Получено пустое SMS (индекс {idx}), удаление из модема...")
+                    self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                    self.problem_sms_retries.pop(idx, None)
                     continue
 
                 if "ref" in sms and "seq" in sms and "cnt" in sms:
@@ -313,69 +416,136 @@ class ModemController:
                         "idx": idx,
                         "seq": seq,
                         "cnt": cnt,
-                        "text": text
+                        "text": text,
+                        "pdu_hex": pdu_hex,
+                        "dcs": dcs,
+                        "fmt": fmt
                     })
                 else:
                     single_sms.append({
                         "idx": idx,
                         "sender": sender,
-                        "text": text
+                        "text": text,
+                        "pdu_hex": pdu_hex,
+                        "dcs": dcs,
+                        "fmt": fmt
                     })
             except Exception as e:
                 logger.error(f"Ошибка декодирования PDU (индекс {idx}): {e}")
+                self._handle_sms_failure(idx, pdu_hex, e)
 
         current_time = time.time()
 
-
         for msg_info in single_sms:
-            sender = msg_info["sender"]
-            text = msg_info["text"]
             idx = msg_info["idx"]
+            pdu_hex = msg_info.get("pdu_hex")
+            try:
+                sender = msg_info["sender"]
+                raw_text = msg_info["text"]
+                dcs = msg_info.get("dcs")
 
-            safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
-            safe_text = text.replace("_", "\\_").replace("*", "\\*")
-            msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+                decoded_text, is_binary = self._safe_decode_sms_text(raw_text, dcs)
+                safe_sender = self._escape_markdown(sender)
+                safe_text = self._escape_markdown(decoded_text)
 
-            if self.notifier.send_message(msg):
-                self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                icon = "💾" if is_binary else "📩"
+                title = "Бинарное СМС" if is_binary else "Новое СМС"
+                msg = f"{icon} *{title}*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+
+                if self.notifier.send_message(msg):
+                    self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                    self.problem_sms_retries.pop(idx, None)
+                else:
+                    logger.warning(f"Не удалось доставить SMS {idx} в Telegram. Оставляем в памяти модема.")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке одиночного SMS (индекс {idx}): {e}", exc_info=True)
+                self._handle_sms_failure(idx, pdu_hex, e)
 
         for key, parts in multipart_sms.items():
             sender, ref = key
             cnt = parts[0]["cnt"]
 
+            def _assemble_multipart(parts_list: List[Dict[str, Any]]) -> Tuple[str, bool]:
+                has_bytes = any(isinstance(p["text"], bytes) for p in parts_list)
+                if has_bytes:
+                    byte_chunks: List[bytes] = []
+                    for p in parts_list:
+                        chunk = p["text"]
+                        if isinstance(chunk, bytes):
+                            byte_chunks.append(chunk)
+                        elif isinstance(chunk, str):
+                            byte_chunks.append(chunk.encode("utf-8", errors="replace"))
+                        else:
+                            byte_chunks.append(str(chunk).encode("utf-8", errors="replace"))
+                    return self._safe_decode_sms_text(b"".join(byte_chunks))
+                else:
+                    text_chunks = [str(p["text"]) for p in parts_list]
+                    return self._safe_decode_sms_text("".join(text_chunks))
+
             if len(parts) >= cnt:
-                parts.sort(key=lambda p: p["seq"])
-                full_text = "".join([p["text"] for p in parts])
-                indices_to_delete = [p["idx"] for p in parts]
+                try:
+                    parts.sort(key=lambda p: p["seq"])
+                    full_text, is_binary = _assemble_multipart(parts)
+                    indices_to_delete = [p["idx"] for p in parts]
 
-                safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
-                safe_text = full_text.replace("_", "\\_").replace("*", "\\*")
-                msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+                    safe_sender = self._escape_markdown(sender)
+                    safe_text = self._escape_markdown(full_text)
 
-                if self.notifier.send_message(msg):
-                    for idx in indices_to_delete:
-                        self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                    icon = "💾" if is_binary else "📩"
+                    title = "Бинарное СМС" if is_binary else "Новое СМС"
+                    msg = f"{icon} *{title}*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
 
-                self.incomplete_sms_tracker.pop(key, None)
+                    if self.notifier.send_message(msg):
+                        for idx in indices_to_delete:
+                            self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                            self.problem_sms_retries.pop(idx, None)
+                        self.incomplete_sms_tracker.pop(key, None)
+                    else:
+                        logger.warning(f"Не удалось доставить составное SMS {key} в Telegram.")
+                except Exception as e:
+                    logger.error(f"Ошибка обработки составного SMS {key}: {e}", exc_info=True)
+                    for p in parts:
+                        self._handle_sms_failure(p["idx"], p.get("pdu_hex"), e)
             else:
                 if key not in self.incomplete_sms_tracker:
                     self.incomplete_sms_tracker[key] = current_time
                     logger.info(f"Получены не все части СМС ({len(parts)}/{cnt}) от {sender}. Ждем остальные.")
                 elif current_time - self.incomplete_sms_tracker[key] > MULTIPART_SMS_TIMEOUT:
                     logger.warning(f"Таймаут ожидания частей СМС от {sender}. Отправляем то, что есть.")
-                    parts.sort(key=lambda p: p["seq"])
-                    full_text = "".join([f"[{p['seq']}/{cnt}] " + p["text"] for p in parts])
-                    indices_to_delete = [p["idx"] for p in parts]
+                    try:
+                        parts.sort(key=lambda p: p["seq"])
+                        has_bytes = any(isinstance(p["text"], bytes) for p in parts)
+                        if has_bytes:
+                            rendered_parts = []
+                            for p in parts:
+                                chunk_txt, _ = self._safe_decode_sms_text(p["text"])
+                                rendered_parts.append(f"[{p['seq']}/{cnt}] {chunk_txt}")
+                            full_text = "\n".join(rendered_parts)
+                            is_binary = True
+                        else:
+                            full_text = "".join([f"[{p['seq']}/{cnt}] " + str(p["text"]) for p in parts])
+                            is_binary = False
 
-                    safe_sender = sender.replace("_", "\\_").replace("*", "\\*")
-                    safe_text = full_text.replace("_", "\\_").replace("*", "\\*")
-                    msg = f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+                        indices_to_delete = [p["idx"] for p in parts]
 
-                    if self.notifier.send_message(msg):
-                        for idx in indices_to_delete:
-                            self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                        safe_sender = self._escape_markdown(sender)
+                        safe_text = self._escape_markdown(full_text)
 
-                    self.incomplete_sms_tracker.pop(key, None)
+                        icon = "💾" if is_binary else "📩"
+                        title = "Бинарное СМС (неполное)" if is_binary else "Новое СМС (неполное)"
+                        msg = f"{icon} *{title}*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}"
+
+                        if self.notifier.send_message(msg):
+                            for idx in indices_to_delete:
+                                self._send_at_command(f"AT+CMGD={idx}\r\n".encode())
+                                self.problem_sms_retries.pop(idx, None)
+                            self.incomplete_sms_tracker.pop(key, None)
+                        else:
+                            logger.warning(f"Не удалось доставить неполное SMS {key} в Telegram.")
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки неполного SMS {key}: {e}", exc_info=True)
+                        for p in parts:
+                            self._handle_sms_failure(p["idx"], p.get("pdu_hex"), e)
 
         keys_to_remove = [k for k in self.incomplete_sms_tracker if k not in multipart_sms]
         for k in keys_to_remove:
@@ -539,7 +709,9 @@ class ModemController:
             text = text_raw.decode("utf-8", errors="ignore").strip()
             sender_match = re.search(r'"([^"]+)"', line)
             sender = sender_match.group(1) if sender_match else "Неизвестный"
-            self.notifier.send_message(f"📩 *Новое СМС*\n👤 От: `{sender}`\n💬 Текст: {text}")
+            safe_sender = self._escape_markdown(sender)
+            safe_text = self._escape_markdown(text)
+            self.notifier.send_message(f"📩 *Новое СМС*\n👤 От: `{safe_sender}`\n💬 Текст:\n{safe_text}")
         except Exception as e:
             logger.error(f"Ошибка чтения входящего СМС в реальном времени: {e}")
 
@@ -600,7 +772,10 @@ class ModemController:
                 self._handle_realtime_sms(line)
             elif line.startswith("+CMTI:"):
                 time.sleep(3)
-                self.process_all_unread_sms()
+                try:
+                    self.process_all_unread_sms()
+                except Exception as e:
+                    logger.error(f"Непредвиденная ошибка при обработке очереди SMS: {e}", exc_info=True)
             elif line.startswith("+CLIP:"):
                 self.handle_incoming_call(line)
             elif line.startswith("+CUSD:"):
