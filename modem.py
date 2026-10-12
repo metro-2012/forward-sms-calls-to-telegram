@@ -277,7 +277,13 @@ class ModemController:
     def _escape_markdown(text: Any) -> str:
         if not isinstance(text, str):
             text = str(text)
-        return text.replace("_", "\\_").replace("*", "\\*")
+        return (
+            text.replace("\\", "\\\\")
+            .replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("`", "\\`")
+            .replace("[", "\\[")
+        )
 
     def _safe_decode_sms_text(self, text: Any, dcs: Optional[int] = None) -> Tuple[str, bool]:
         if isinstance(text, bytes):
@@ -334,7 +340,7 @@ class ModemController:
         msg = (
             f"⚠️ *Проблемное SMS изолировано*\n"
             f"Индекс: `{idx}`\n"
-            f"Причина: `{safe_reason}`\n"
+            f"Причина: {safe_reason}\n"
             f"Размер PDU: `{pdu_len}` байт, Хэш: `{pdu_hash}`\n"
             f"_Сообщение удалено из модема для предотвращения блокировки очереди._"
         )
@@ -343,7 +349,7 @@ class ModemController:
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление о карантине в Telegram: {e}")
 
-    def _handle_sms_failure(self, idx: str, pdu_hex: Optional[str], error: Exception) -> None:
+    def _handle_sms_failure(self, idx: str, pdu_hex: Optional[str], error: Any) -> None:
         retries = self.problem_sms_retries.get(idx, 0) + 1
         self.problem_sms_retries[idx] = retries
 
@@ -457,6 +463,7 @@ class ModemController:
                     self.problem_sms_retries.pop(idx, None)
                 else:
                     logger.warning(f"Не удалось доставить SMS {idx} в Telegram. Оставляем в памяти модема.")
+                    self._handle_sms_failure(idx, pdu_hex, Exception("Не удалось доставить SMS в Telegram"))
             except Exception as e:
                 logger.error(f"Ошибка при обработке одиночного SMS (индекс {idx}): {e}", exc_info=True)
                 self._handle_sms_failure(idx, pdu_hex, e)
@@ -502,6 +509,8 @@ class ModemController:
                         self.incomplete_sms_tracker.pop(key, None)
                     else:
                         logger.warning(f"Не удалось доставить составное SMS {key} в Telegram.")
+                        for p in parts:
+                            self._handle_sms_failure(p["idx"], p.get("pdu_hex"), Exception("Не удалось доставить составное SMS в Telegram"))
                 except Exception as e:
                     logger.error(f"Ошибка обработки составного SMS {key}: {e}", exc_info=True)
                     for p in parts:
@@ -542,6 +551,8 @@ class ModemController:
                             self.incomplete_sms_tracker.pop(key, None)
                         else:
                             logger.warning(f"Не удалось доставить неполное SMS {key} в Telegram.")
+                            for p in parts:
+                                self._handle_sms_failure(p["idx"], p.get("pdu_hex"), Exception("Не удалось доставить неполное SMS в Telegram"))
                     except Exception as e:
                         logger.error(f"Ошибка обработки неполного SMS {key}: {e}", exc_info=True)
                         for p in parts:
