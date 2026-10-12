@@ -5,7 +5,7 @@ import logging
 import threading
 import queue
 from collections import defaultdict
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 import serial
 
 from config import (
@@ -47,11 +47,19 @@ def encode_ussd_7bit(text: str) -> str:
 
 class ModemController:
 
-    def __init__(self, port: str, baud_rate: int, notifier: TelegramNotifier, cmd_queue: queue.Queue):
+    def __init__(
+        self,
+        port: str,
+        baud_rate: int,
+        notifier: TelegramNotifier,
+        cmd_queue: queue.Queue,
+        on_connected: Optional[Callable[[], None]] = None
+    ):
         self.port = port
         self.baud_rate = baud_rate
         self.notifier = notifier
         self.cmd_queue = cmd_queue
+        self.on_connected = on_connected
         self.ser: Optional[serial.Serial] = None
         self.last_call_info: Dict[str, Any] = {"number": None, "timestamp": 0.0}
         self.is_running = False
@@ -66,6 +74,12 @@ class ModemController:
                 raise serial.SerialException("Модем не прошел проверку готовности SIM/SMS.")
             self._init_modem()
             logger.info("Модем инициализирован и готов к работе.")
+
+            if self.on_connected:
+                try:
+                    self.on_connected()
+                except Exception as e:
+                    logger.error(f"Ошибка в on_connected callback: {e}")
 
             try:
                 logger.info("Проверка пропущенных СМС в памяти...")
@@ -124,6 +138,12 @@ class ModemController:
                         raise serial.SerialException("Модем не прошел проверку готовности SIM/SMS после перезагрузки.")
                     self._init_modem()
                     logger.info("Модем успешно переподключен и готов к работе.")
+
+                    if self.on_connected:
+                        try:
+                            self.on_connected()
+                        except Exception as e:
+                            logger.error(f"Ошибка в on_connected callback: {e}")
 
                     try:
                         self.process_all_unread_sms()
@@ -585,3 +605,6 @@ class ModemController:
                 self.handle_incoming_call(line)
             elif line.startswith("+CUSD:"):
                 self._handle_ussd_response(line)
+
+        if self.is_running:
+            raise serial.SerialException("Связь с модемом потеряна (порт закрыт).")

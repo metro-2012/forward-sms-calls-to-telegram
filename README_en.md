@@ -44,6 +44,8 @@ Send the following commands to your Telegram bot:
 | `INCOMING_CALL_DURATION` | `2.0` | Delay in seconds before the bot drops an incoming call. |
 | `CLIP_DEBOUNCE_TIME` | `10.0` | Anti-spam filter (in seconds) for incoming calls from the same number. |
 | `MULTIPART_SMS_TIMEOUT` | `15.0` | Timeout (in seconds) for waiting for all parts of a concatenated SMS before sending what was received. |
+| `MODEM_ERROR_TIMEOUT` | `60.0` | Continuous failure duration (in seconds) before sending an error to Telegram. |
+| `MODEM_ERROR_REPEAT_TIMEOUT` | `0.0` | Repeat interval for error notifications during ongoing failure (in seconds, `0` to disable repeats). |
 | `LOG_LEVEL` | `INFO` | Log verbosity level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Set to `DEBUG` to view raw AT commands. |
 
 ---
