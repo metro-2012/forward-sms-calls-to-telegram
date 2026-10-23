@@ -621,6 +621,30 @@ class ModemController:
                 logger.error(f"Ошибка от модема: {response.decode(errors='ignore')}")
                 return False
 
+    def _check_call_cancelled(self, number: str) -> bool:
+        try:
+            temp_cmds = []
+            cancelled = False
+            while not self.cmd_queue.empty():
+                cmd = self.cmd_queue.get_nowait()
+                cmd_action = cmd.strip().split()[0].lower() if cmd.strip() else ""
+                if cmd_action in ["/hangup", "/stop", "/internal_hangup", "/drop"]:
+                    cancelled = True
+                else:
+                    temp_cmds.append(cmd)
+            for pending_cmd in temp_cmds:
+                self.cmd_queue.put(pending_cmd)
+
+            if cancelled:
+                logger.info(f"Звонок на {number} отменён пользователем.")
+                self._send_at_command(b"AT+CHUP\r\n")
+                if self.ser: self.ser.reset_input_buffer()
+                self.notifier.send_message(f"⏹ Звонок на `{number}` отменён.")
+                return True
+        except queue.Empty:
+            pass
+        return False
+
     def perform_call(self, number: str, duration: float = OUTGOING_CALL_DURATION) -> None:
         self.notifier.send_message(f"⏳ Начинаю набор номера `{number}`...")
         self.ser.reset_input_buffer()
@@ -631,6 +655,8 @@ class ModemController:
         start_dial_time = time.time()
 
         while time.time() - start_dial_time < 2.0:
+            if self._check_call_cancelled(number):
+                return
             line = self.ser.readline().decode("utf-8", errors="ignore").strip()
             if line and any(err in line for err in ["ERROR", "NO CARRIER", "BUSY", "NO DIALTONE"]):
                 logger.warning(f"Сбой при попытке позвонить: {line}")
@@ -641,6 +667,8 @@ class ModemController:
         wait_start = time.time()
 
         while time.time() - wait_start < duration:
+            if self._check_call_cancelled(number):
+                return
             line = self.ser.readline().decode("utf-8", errors="ignore").strip()
             if line and any(err in line for err in ["NO CARRIER", "BUSY"]):
                 self.notifier.send_message(f"ℹ️ Абонент `{number}` отклонил/сбросил вызов ({line}).")
@@ -679,9 +707,10 @@ class ModemController:
         parts = cmd_text.split(maxsplit=2)
         action = parts[0].lower()
 
-        if action == "/internal_hangup":
+        if action in ["/internal_hangup", "/hangup", "/stop", "/drop"]:
             self._send_at_command(b"AT+CHUP\r\n")
             if self.ser: self.ser.reset_input_buffer()
+            self.notifier.send_message("ℹ️ Вызов сброшен (AT+CHUP).")
 
         elif action == "/call" and len(parts) >= 2:
             number = parts[1]
@@ -727,6 +756,7 @@ class ModemController:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
                 "📞 `/call +7999... [сек]` — Звонок-сброс\n"
+                "🛑 `/hangup` — Сбросить/отменить звонок\n"
                 "✉️ `/sms +7999... Текст` — Отправить SMS\n"
                 "💰 `/ussd *100#` — Запрос баланса / USSD\n"
                 "♻️ `/reboot` — Перезапуск модема (AT+CFUN=1,1)\n"
