@@ -684,7 +684,28 @@ class ModemController:
             if self.ser: self.ser.reset_input_buffer()
 
         elif action == "/call" and len(parts) >= 2:
-            self.perform_call(parts[1])
+            number = parts[1]
+            duration = OUTGOING_CALL_DURATION
+            if len(parts) >= 3:
+                duration_match = re.match(r"^(\d+(?:\.\d+)?)", parts[2].strip())
+                if duration_match:
+                    try:
+                        custom_duration = float(duration_match.group(1))
+                        if custom_duration > 0:
+                            duration = custom_duration
+                        else:
+                            logger.warning(
+                                f"Некорректная длительность звонка ({custom_duration}), "
+                                f"используется значение по умолчанию {OUTGOING_CALL_DURATION} сек."
+                            )
+                    except ValueError:
+                        pass
+                else:
+                    logger.warning(
+                        f"Не удалось распознать длительность звонка из '{parts[2]}', "
+                        f"используется значение по умолчанию {OUTGOING_CALL_DURATION} сек."
+                    )
+            self.perform_call(number, duration=duration)
 
         elif action == "/sms" and len(parts) >= 3:
             self.send_sms(parts[1], parts[2])
@@ -705,7 +726,7 @@ class ModemController:
         elif action in ["/help", "/start"]:
             help_msg = (
                 "🤖 *ModemBot*\n\n"
-                "📞 `/call +7999...` — Звонок-сброс\n"
+                "📞 `/call +7999... [сек]` — Звонок-сброс\n"
                 "✉️ `/sms +7999... Текст` — Отправить SMS\n"
                 "💰 `/ussd *100#` — Запрос баланса / USSD\n"
                 "♻️ `/reboot` — Перезапуск модема (AT+CFUN=1,1)\n"
